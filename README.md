@@ -50,5 +50,3 @@ This script hosts the SparseDrive model in a persistent state on the GPU, waitin
 ### Key Coordination Points
 * **nuScenes vs CARLA:** The model thinks $Y$ is forward; CARLA thinks $X$ is forward. The conversion happens in `sim.py` using `nuscenes_to_carla`.
 * **Stage-2 Significance:** Because this is "Stage-2," the model isn't just detecting objects; it is actively planning a path based on those detections, making it a true "end-to-end" driving system.
-
-**With this documentation, your system is fully mapped. Ready to implement the Controller so the Tesla can finally move?**

@@ -1,0 +1,1 @@
+${CARLA_ROOT}/CarlaUE4.sh -quality-level=Low -nosound -carla-rpc-port=3001 -graphicsadapter=0

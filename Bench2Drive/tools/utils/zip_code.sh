@@ -1,0 +1,1 @@
+zip -r code.zip projects/ -x "projects/mmdet3d_plugin/ops/*" -x "*__pycache__*"

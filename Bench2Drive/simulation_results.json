@@ -1,0 +1,16 @@
+{
+    "_checkpoint": {
+        "global_record": {},
+        "progress": [
+            1,
+            1
+        ],
+        "records": [
+            {
+                "index": 0,
+                "route_id": "RouteScenario_1085_rep0",
+                "scenario_name": 0,
+                "weather_id": [
+                    [
+                        0.0,
+                        

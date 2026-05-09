@@ -1,0 +1,6 @@
+__pycache__/
+f2d_carla/
+Fail2Drive/
+ckpt/
+data/
+close_loop_log/

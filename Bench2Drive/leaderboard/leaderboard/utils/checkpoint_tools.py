@@ -6,6 +6,29 @@ except ImportError:
 import requests
 import os.path
 
+import carla
+
+class CarlaJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder for CARLA objects"""
+    def default(self, obj):
+        if isinstance(obj, carla.WeatherParameters):
+            return {
+                'cloudiness': obj.cloudiness,
+                'precipitation': obj.precipitation,
+                'sun_altitude_angle': obj.sun_altitude_angle,
+                'sun_azimuth_angle': obj.sun_azimuth_angle,
+                'precipitation_deposits': obj.precipitation_deposits,
+                'wind_intensity': obj.wind_intensity,
+                'fog_density': obj.fog_density,
+                'wetness': obj.wetness,
+                'fog_distance': obj.fog_distance,
+                'fog_falloff': obj.fog_falloff,
+            }
+        # Handle other CARLA types if needed
+        try:
+            return str(obj)
+        except:
+            return super().default(obj)
 
 def autodetect_proxy():
     proxies = {}
@@ -57,4 +80,4 @@ def save_dict(endpoint, data):
             _ = requests.patch(url=endpoint, headers={'content-type':'application/json'}, data=json.dumps(data, indent=4, sort_keys=True))
     else:
         with open(endpoint, 'w') as fd:
-            json.dump(data, fd, indent=4)
+            json.dump(data, fd, indent=4, cls=CarlaJSONEncoder)

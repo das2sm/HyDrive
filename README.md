@@ -1,184 +1,247 @@
-# Geometric Divergence for Sparse Planners — 3-Month Research Roadmap
+# Goal
 
-## Core Objective
+Show that temporal divergence between planner futures and world occupancy futures predicts sparse-planner failures better than TTC/RSS/distance baselines under controlled confounds.
 
-Validate whether **trajectory–occupancy geometric inconsistency** is a **predictive early-warning signal of failure** in sparse transformer planners, beyond TTC/RSS/distance baselines.
+No system-building beyond what is needed to validate the signal.
 
 ---
 
-# MONTH 1 — Signal + Dataset Construction (NO MODELING YET)
+# 3-Month Roadmap: Distributional Planner–World Divergence
+
+---
+
+# Month 1 — Build the Measurement System (No claims, no interventions)
 
 ## Goal
 
-Build a **clean, bias-minimized measurement system**.
+Create a reliable, bias-controlled dataset of:
 
-You are NOT building a safety system.
-You are building a **failure measurement instrument**.
+* planner future distributions
+* world occupancy future distributions
+* failure outcomes
+
+This month is purely about instrumentation correctness.
 
 ---
 
-## 1. Freeze system interfaces
+## 1. Freeze experimental stack
 
 Lock:
 
-* planner (SparseDrive / VAD-style model)
-* BEV occupancy (oracle or learned, but fixed)
-* ego state + control logs
+* one sparse planner (e.g., SparseDrive / VAD variant)
+* one simulator setup (CARLA / Bench2Drive)
+* one occupancy source (oracle or learned, but fixed for entire study)
+* one evaluation split (nominal + OOD + occlusion)
 
-No architecture changes after this point.
-
----
-
-## 2. Define only 3 signals
-
-You are strictly limited to:
-
-### (A) Geometric overlap
-
-* trajectory tube vs occupancy intersection
-
-### (B) TTC
-
-* time to first collision with occupancy
-
-### (C) Confidence proxy (pick ONE)
-
-* trajectory score margin
-* entropy over multi-modal trajectories
-* top-1 vs top-2 gap
+No changes later.
 
 ---
 
-## 3. Build failure labeling (critical)
+## 2. Implement planner distribution extraction
 
-Define outcome using **future horizon (1–3s)**:
+Convert deterministic outputs into:
+
+* K trajectory samples OR
+* multi-modal prediction heads OR
+* ensemble rollouts
+
+Store:
+
+Pπ(x_{t:t+H})
+
+Minimum requirement:
+
+* at least 5–10 plausible futures per timestep
+
+---
+
+## 3. Implement world occupancy evolution
+
+Create time-indexed occupancy:
+
+* BEV grid over horizon H
+* probabilistic occupancy (not binary if possible)
+
+Store:
+
+Pw(x_{t:t+H})
+
+---
+
+## 4. Synchronize time horizon
+
+Define:
+
+* H = 1–3 seconds
+* fixed timestep resolution
+
+Ensure both distributions evolve on the same temporal grid.
+
+---
+
+## 5. Define outcome labels
+
+At each timestep:
 
 * safe
 * near-miss
 * failure (collision or unavoidable intervention)
 
-Must be forward-looking, not reactive.
+Important:
 
----
-
-## 4. Dataset generation
-
-Run controlled scenarios:
-
-* nominal driving
-* occlusion-heavy scenes
-* OOD objects (rare geometry, animals, cones, construction)
-* dense traffic vs sparse traffic
-
-Log per timestep:
-
-* (G, TTC, C, outcome)
+* labels are future-conditioned, not reactive
 
 ---
 
 ## Month 1 Deliverable
 
-A clean, temporally aligned dataset of geometry–confidence–failure tuples
+A dataset containing:
 
-No claims yet. Just measurement.
+* planner trajectory distributions
+* occupancy distributions over time
+* labeled outcomes
+* synchronized temporal alignment
+
+No metrics yet.
 
 ---
 
-# MONTH 2 — Predictive Validity + Confound Control
+# Month 2 — Prove Predictive Value (Core scientific result)
 
 ## Goal
 
-Prove divergence adds **real predictive information beyond baselines**.
+Show divergence adds information beyond TTC/RSS/distance under strict controls.
 
-This is the scientific core.
-
----
-
-## 1. Define candidate signals
-
-Evaluate:
-
-* TTC
-* RSS violation (Responsibility-Sensitive Safety)
-* distance-to-occupancy
-* divergence metric (combinations of G, TTC, C)
+This is the paper-defining month.
 
 ---
 
-## 2. Main experiment: Early failure prediction
+## 1. Compute baseline signals
 
-Task:
+For every timestep:
+
+* TTC (Responsibility-Sensitive Safety)
+* minimum distance to occupancy
+* RSS violation indicator (Responsibility-Sensitive Safety)
+* divergence signal D(t)
+
+---
+
+## 2. Define divergence functional
+
+Use a consistent metric (fixed for all experiments):
+
+* Wasserstein distance OR
+* JS divergence OR
+* set-based overlap distance
+
+Apply over:
+
+D(t) = D(Pπ(x_{t:t+H}), Pw(x_{t:t+H}))
+
+---
+
+## 3. Main task: early failure prediction
 
 Predict failure within 1–3 seconds.
 
-Metric:
+Report:
 
 * AUROC
 * AUPRC
-* calibration (optional but strong)
+* calibration curve (optional but strong)
 
 ---
 
-## 3. Key requirement: lead-time analysis
+## 4. Critical experiment: matched-bin separation
+
+Bin by:
+
+* TTC range
+* distance range
+* speed range
+* occlusion level
+
+Then test:
+
+Does divergence still separate failure vs non-failure within each bin?
+
+This is the anti-TTC-collapse test.
+
+---
+
+## 5. Lead-time analysis
 
 Show:
 
-> divergence rises earlier than TTC/RSS triggers
+* divergence rises earlier than TTC/RSS triggers
+
+Measure:
+
+* time-to-signal vs time-to-failure
+
+Plot:
+
+* divergence lead-time distribution
 
 ---
 
-## 4. Confound control (critical)
+## 6. Ablation study (mandatory)
 
-Stratify results by:
+Remove:
 
-* occlusion level
-* traffic density
-* ego speed bins
+* multi-modal planner sampling
+* temporal aggregation
+* uncertainty in occupancy (if used)
 
-Then show:
+Show:
 
-> divergence still separates failure vs non-failure within each bin
+* predictive performance degrades
 
----
-
-## 5. Ablation study (mandatory)
-
-* w/o confidence term
-* w/o temporal smoothing
-* G-only
-* TTC-only
-* combined vs individual
+This demonstrates structural necessity.
 
 ---
 
 ## Month 2 Deliverable
 
-A validated predictive signal that survives confound controls and beats TTC/RSS in at least one meaningful metric (lead time or AUROC)
+A validated result:
+
+divergence provides statistically significant predictive information beyond TTC/RSS under controlled confounds and matched conditions.
 
 ---
 
-# MONTH 3 — Minimal Intervention Validation
+# Month 3 — Minimal Intervention Validation (Secondary evidence)
 
 ## Goal
 
-Show your signal is usable, not just predictive.
+Show the signal is usable, not just predictive.
 
-BUT: this is secondary evidence.
+This is not the core contribution.
 
 ---
 
-## 1. Intervention modes (ONLY 3)
+## 1. Three-system comparison only
 
-* no safety system (baseline planner)
-* TTC / AEB baseline
+* baseline planner (no safety layer)
+* TTC / AEB braking (Responsibility-Sensitive Safety baseline)
 * divergence-triggered braking
 
-No steering
-No trajectory rewriting
+No steering. No replanning.
 
 ---
 
-## 2. Evaluation metrics
+## 2. Intervention logic
+
+Trigger braking based on:
+
+* threshold on D(t)
+* optionally smoothed over time
+
+No additional heuristics.
+
+---
+
+## 3. Metrics
 
 ### Safety
 
@@ -187,8 +250,8 @@ No trajectory rewriting
 
 ### Utility
 
-* average speed
 * route completion
+* average speed
 
 ### Comfort
 
@@ -197,73 +260,86 @@ No trajectory rewriting
 
 ---
 
-## 3. Key result
+## 4. Key result
 
 Show:
 
-> divergence-based intervention improves safety without collapsing utility compared to TTC/AEB
+divergence-based intervention improves safety without collapsing utility compared to TTC/AEB.
+
+Not:
+
+* best performance
+* optimal driving
+
+Only Pareto improvement or tradeoff shift.
 
 ---
 
-## 4. Required plot
+## 5. Required figure
 
-Safety–Utility tradeoff curve:
+Safety–utility tradeoff curve:
 
 Compare:
 
-* TTC / AEB
-* RSS baseline
-* divergence system
+* TTC / AEB (Responsibility-Sensitive Safety)
+* RSS baseline (Responsibility-Sensitive Safety)
+* divergence-based monitor
 
 ---
 
 ## Month 3 Deliverable
 
-Evidence that the signal is practically usable as a lightweight runtime monitor
+A validated runtime use case:
+
+divergence can act as a lightweight early-warning monitor without excessive conservatism.
 
 ---
 
-# FINAL OUTPUT
+# Final Output of Entire Project
 
-You end with:
+If executed correctly, you produce:
 
-## 1. Predictive failure signal
+## 1. A predictive signal
 
-* geometric divergence metric
+Time-resolved planner–world divergence.
 
-## 2. Validated claim
+## 2. A scientific claim
 
-> divergence improves early failure prediction over TTC/RSS under controlled confounds
+Temporal divergence between planner and environment futures provides predictive information about failures beyond classical geometric safety metrics.
 
-## 3. Failure analysis dataset
+## 3. A controlled dataset
 
-* labeled + stratified
+* distributions over time
+* labeled outcomes
+* confound-stratified splits
 
-## 4. Minimal runtime monitor
+## 4. A minimal runtime monitor (optional)
 
-* braking-only safety layer
-
----
-
-# WHAT THIS REALLY IS
-
-Not:
-
-* safety system
-* planner improvement
-* controller
-
-But:
-
-> a statistical study of whether geometric inconsistency is an early-warning signal of learned planner failure
+Braking-only safety wrapper.
 
 ---
 
-# SUCCESS CRITERIA
+# Success Conditions (Strict)
 
-If ANY fail, paper is weak:
+Must succeed:
+
+* divergence beats TTC in at least one of:
+
+  * AUROC OR
+  * lead time OR
+  * stratified separation
+* survives speed/density/occlusion stratification
+* does not collapse into distance metric
+
+Failure modes:
 
 * no improvement over TTC
-* confound collapse
-* behaves like distance proxy
-* no lead-time gain
+* signal disappears after binning
+* strong dependence on scene complexity
+* no temporal advantage
+
+---
+
+# One-line summary
+
+You are testing whether temporal mismatch between predicted planner futures and predicted world futures is an early statistical indicator of sparse planner failure.

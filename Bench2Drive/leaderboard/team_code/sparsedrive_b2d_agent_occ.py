@@ -17,6 +17,7 @@ import carla
 from team_code.pid_controller import PIDController
 from team_code.planner import RoutePlanner
 from team_code.guardian import Guardian  # ← GUARDIAN IMPORT
+from team_code.divergence_logger import DivergenceLogger  # ← DIVERGENCE LOGGER IMPORT
 
 from leaderboard.autoagents import autonomous_agent
 from leaderboard.utils.route_manipulation import _get_latlon_ref
@@ -154,7 +155,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         self.visualizer = Visualizer(plot_choices, self.save_path, planning_key=cfg.get("anchor_reference_group", "spatial"))
         
         # ========== GUARDIAN INITIALIZATION ==========
-        self.use_guardian = True  # Toggle to enable/disable Guardian
+        self.use_guardian = False  # Toggle to enable/disable Guardian
         if self.use_guardian:
             self.guardian = Guardian(
                 world=None,  # Will be set in _init()
@@ -165,6 +166,15 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         else:
             self.guardian = None
         # =============================================
+
+        # ========== DIVERGENCE LOGGER ==========
+        self.divergence_logger = DivergenceLogger(
+            log_dir=str(self.save_path / 'divergence_logs'),
+            horizon_seconds=3.0,
+            fps=20
+        )
+        print("[SparseDrive] Divergence logger initialized")
+        # =======================================
    
         self.lidar2cam = {
         'CAM_FRONT':np.array([[ 1.  ,  0.  ,  0.  ,  0.  ],
@@ -412,6 +422,31 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
             'global2ego': global2ego,
         }
         
+        collision_occurred = False
+        collision_type = None      # store type identifier: 'vehicle', 'pedestrian', 'layout'
+        
+        if 'COLLISION' in input_data:
+            # input_data['COLLISION'] is a list of CollisionEvent for this frame
+            for collision_event in input_data['COLLISION']:
+                collision_occurred = True
+                # Get type info from collision_event.other_actor
+                other = collision_event.other_actor
+                if other is not None:
+                    type_id = other.type_id
+                    if 'vehicle' in type_id:
+                        collision_type = 'vehicle'
+                        break
+                    elif 'walker' in type_id:
+                        collision_type = 'pedestrian'
+                        break
+                    else:
+                        collision_type = 'layout'
+                else:
+                    collision_type = 'layout'
+        
+        # Append to result dict
+        result['collision'] = collision_occurred
+        result['collision_type'] = collision_type
         return result
     
     @torch.no_grad()
@@ -521,66 +556,107 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         self.clock.count("model")
         
         output = output_data_batch[0]['img_bbox']
-        
+         
+        '''
+        # DEBUGGING OUTPUT STRUCTURE - UNCOMMENT TO INSPECT MODEL OUTPUT
+        for key, value in output.items():
+            if hasattr(value, 'shape'):
+                print(f"{key}: Type={type(value)}, Shape={value.shape}")
+            else:
+                print(f"{key}: Type={type(value)}, Value={value}")
+        return
+        '''
+
         # ========== EXTRACT SPARSEDRIVE TRAJECTORY ==========
-        # DEBUG: Uncomment to see available output keys
-        if self.step == 0:
-            print("[DEBUG] SparseDrive output keys:", output.keys())
-        
-        # Try common trajectory key names
-        traj_key_candidates = [
-            'final_planning',
-            'traj_pred', 
-            'planning',
-            'ego_fut_preds',
-            'sdc_planning',
-            'planning_traj',
-            'temporal_2hz_reg_final'  # Common in SparseDrive
-        ]
-        
-        sparsedrive_traj = None
-        for key in traj_key_candidates:
-            if key in output:
-                sparsedrive_traj = output[key]
-                if torch.is_tensor(sparsedrive_traj):
-                    sparsedrive_traj = sparsedrive_traj.cpu().numpy()
-                print(f"[DEBUG] Found trajectory in key: {key}, shape: {sparsedrive_traj.shape}")
-                break
-        
-        if sparsedrive_traj is None:
-            print(f"[WARNING] Could not find trajectory in output keys: {output.keys()}")
-            # Fallback: use route waypoints
-            sparsedrive_traj = results.get("route", np.zeros((12, 2)))
-        
-        # Ensure trajectory is in correct shape: (N, 2) or (N, 3)
-        if sparsedrive_traj.ndim == 3:  # Batch dimension
-            sparsedrive_traj = sparsedrive_traj[0]
-        
-        # CRITICAL: SparseDrive likely uses [x, y] in ego frame
-        # Guardian expects [left, forward] (VAD format)
-        # Based on SparseDrive architecture, it's likely [forward, left] or [x, y]
-        
-        # OPTION 1: If SparseDrive uses standard ego [x=forward, y=left]:
-        guardian_traj = sparsedrive_traj[:, :2]  # Use as-is
-        
-        # OPTION 2: If SparseDrive uses [left, forward] already:
-        # guardian_traj = sparsedrive_traj[:, :2]
-        
-        # OPTION 3: If SparseDrive uses [forward, left] (most likely):
-        # guardian_traj = np.stack([sparsedrive_traj[:, 1], sparsedrive_traj[:, 0]], axis=1)
-        
-        # Debug: Print first few waypoints
-        if self.step % 50 == 0:
-            print(f"\n[DEBUG Step {self.step}]")
-            print(f"Trajectory shape: {guardian_traj.shape}")
-            print(f"First 3 waypoints:\n{guardian_traj[:3]}")
-            print(f"Ego speed: {tick_data['speed']:.2f} m/s")
-        
+        # SparseDrive outputs trajectory in 'traj_final'
+        if 'traj_final' in output:
+            sparsedrive_traj = output['traj_final']
+            
+            if torch.is_tensor(sparsedrive_traj):
+                sparsedrive_traj = sparsedrive_traj.cpu().numpy()
+            
+            # Debug trajectory
+            if self.step % 50 == 0 or self.step < 5:
+                print(f"\n[DEBUG Step {self.step}]")
+                print(f"Guardian trajectory shape: {sparsedrive_traj.shape}")
+                print(f"First 3 waypoints:\n{sparsedrive_traj[:3]}")
+                print(f"Max forward extent: {sparsedrive_traj[:, 1].max():.2f}m")
+                print(f"Ego speed: {tick_data['speed']:.2f} m/s")
+
+        else:
+            print(f"[ERROR] 'traj_final' not found in output keys: {output.keys()}")
+
+        # ========== EXTRACT EGO MULTI-MODAL PLANNER DISTRIBUTION ==========
+        if 'traj_reg' not in output or 'traj_cls' not in output:
+            print(f"[ERROR] Planner trajectory or scores not found in output. Keys: {output.keys()}")
+
+        else:   
+            K = 6
+            planner_trajs = output['traj_reg']          # (1024, 6, 2)
+            planner_scores = output['traj_cls']         # (1024,)
+            topk_scores, topk_indices = torch.topk(planner_scores, k=K)
+            planner_trajs = planner_trajs[topk_indices] # (6, 6, 2)
+            planner_scores = topk_scores
+            planner_scores = planner_scores / (planner_scores.sum() + 1e-8)   # normalize
+            planner_trajs = planner_trajs.detach().cpu().numpy()  # (6, 6, 2)
+            planner_scores = planner_scores.detach().cpu().numpy()  # (6,)
+
+            assert planner_trajs.shape == (K, 6, 2), f"Wrong shape: {planner_trajs.shape}"
+
+            if self.step % 50 == 0:
+                print("\n[Divergence Debug]")
+                print(f"Planner modes: {planner_trajs.shape[0]}")
+                print(f"Waypoints per mode: {planner_trajs.shape[1]}")  
+                print(f"Scores: {planner_scores}")
+                # print("Raw traj_reg[0, :, :]:\n", output['traj_reg'][0, :, :])
+                
+                # Show full trajectory for Mode 0
+                print(f"\n✓ Mode 0 (score={planner_scores[0]:.3f}) - FULL TRAJECTORY:")
+                for t in range(planner_trajs.shape[1]):
+                    wp = planner_trajs[0, t]
+                    print(f"  t={t}: [{wp[0]:6.2f}, {wp[1]:6.2f}] (left, forward)")
+                
+                # Show endpoints for all modes
+                print(f"\n✓ All mode endpoints:")
+                for i in range(K):
+                    endpoint = planner_trajs[i, -1]
+                    print(f"  Mode {i} (score={planner_scores[i]:.3f}): [{endpoint[0]:6.2f}, {endpoint[1]:6.2f}]")
+
         # ========== GET EGO STATE FOR GUARDIAN ==========
         ego_actor = CarlaDataProvider.get_hero_actor()
         ego_transform = ego_actor.get_transform()
         ego_speed = tick_data['speed']
         
+        # ========== COMPUTE OCCUPANCY AND BASELINE SIGNALS ==========
+        if self.guardian is not None:
+            # Get occupancy grid from Guardian
+            occ_grid, occ_meta = self.guardian.build_carla_occupancy(ego_transform)
+            
+            # Compute minimum distance to forward obstacles
+            occupied = np.argwhere(occ_grid > 0.5)
+            if len(occupied) > 0:
+                local_occ = self.guardian._grid_to_local(occupied)
+                # Only consider forward obstacles (forward = positive in first column)
+                forward_obstacles = local_occ[local_occ[:, 0] > 0.0]
+                if len(forward_obstacles) > 0:
+                    min_dist = float(np.linalg.norm(forward_obstacles, axis=1).min())
+                else:
+                    min_dist = 999.0
+            else:
+                min_dist = 999.0
+            
+            # Compute TTC (simplified)
+            if ego_speed > 0.5 and min_dist < 50:
+                ttc = min_dist / max(ego_speed, 0.1)
+            else:
+                ttc = 999.0
+        else:
+            # No Guardian - create dummy occupancy
+            occ_grid = np.zeros((240, 240), dtype=np.float32)
+            min_dist = 999.0
+            ttc = 999.0
+            occ_meta = {'source': 'none', 'actor_count': 0}
+
         # ========== APPLY GUARDIAN INTERVENTION ==========
         guardian_intervene = False
         guardian_brake = 0.0
@@ -588,7 +664,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         if self.guardian is not None and self.use_guardian:
             try:
                 guardian_intervene, guardian_brake = self.guardian.evaluate(
-                    traj=guardian_traj,
+                    traj=sparsedrive_traj,
                     ego_transform=ego_transform,
                     speed=ego_speed,
                     ego_actor=ego_actor
@@ -597,6 +673,45 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 print(f"[Guardian ERROR] {e}")
                 import traceback
                 traceback.print_exc()
+        
+        # ========== DETECT COLLISION/NEAR-MISS ==========
+        '''
+        collision_occurred = tick_data.get('collision', False)
+        collision_type = tick_data.get('collision_type', None)
+        '''
+
+        # TODO
+        collision_occurred = False
+        near_miss = False
+
+        '''
+        near_miss = (min_dist < 1.5) and (ego_speed > 1.0) and (not collision_occurred)
+
+        if collision_occurred:
+            print(f"Collision detected with {collision_type}")
+        elif near_miss:
+            print("Near miss detected: Obstacle within 1.5m at speed > 1.0 m/s")    
+        '''
+        # ========== LOG DIVERGENCE DATA ==========
+        self.divergence_logger.log_timestep(
+            planner_trajs=planner_trajs,      # (K, T, 2) - multiple trajectory modes
+            planner_scores=planner_scores,       # (K,) - probability weights
+            occupancy_grid=occ_grid,          # (H, W) - BEV occupancy
+            ego_transform=ego_transform,      # CARLA transform
+            ego_speed=ego_speed,              # float
+            ttc=ttc,                          # float
+            min_distance=min_dist,            # float
+            collision=collision_occurred,              # bool
+            near_miss=near_miss,              # bool
+            metadata={
+                'route_step': self.step,
+                'command': command,
+                'guardian_intervene': guardian_intervene,
+                'occupancy_source': occ_meta.get('source', 'unknown'),
+                'num_actors': occ_meta.get('actor_count', 0),
+                'planner_modes': planner_trajs.shape[0]
+            }
+        )
         
         # ========== NORMAL PID CONTROL ==========
         steer_traj, throttle_traj, brake_traj, metadata_traj = self.pidcontroller.control_pid(
@@ -614,7 +729,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         
         control = carla.VehicleControl()
         self.pid_metadata = metadata_traj
-        self.pid_metadata['agent'] = 'sparsedrive_guardian' if guardian_intervene else 'sparsedrive_only'
+        self.pid_metadata['agent'] = 'only_traj'
         
         control.steer = np.clip(float(steer_traj), -1, 1)
         control.throttle = np.clip(float(throttle_traj), 0, 1)
@@ -664,6 +779,10 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         outfile.close()
     
     def destroy(self):
+        # Save divergence log before cleanup
+        route_name = f"route_{self.save_name}"
+        self.divergence_logger.save_route(route_name)
+
         del self.model
         torch.cuda.empty_cache()
         self.visualizer.image2video()

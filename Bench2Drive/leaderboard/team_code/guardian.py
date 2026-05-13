@@ -17,7 +17,7 @@ class Guardian:
     Safety Shield / Runtime Monitor for CARLA + Bench2Drive.
     Checks if the ego vehicle's future swept volume overlaps with any obstacles.
     """
-    def __init__(self, world, log_dir='results/guardian_logs', debug=False):
+    def __init__(self, world, log_dir='results/guardian_logs', debug=True):
         self.world = world
         self.debug = debug
         
@@ -31,7 +31,7 @@ class Guardian:
         self.vehicle_width = 2.1                # meters
         self.vehicle_height = 2.0               # meters
         self.longitudinal_margin = 1.2          # extra meters in front/back
-        self.lateral_margin = 0.8               # extra meters on sides (important for future swerving)
+        self.lateral_margin = 0.35               # extra meters on sides (important for future swerving)
         self.sweep_sample_spacing = 0.9         # max meters between swept-volume OBB samples
         self.max_debug_boxes = 80               # throttle CARLA debug draw load
         self.debug_draw_interval = 2
@@ -39,16 +39,16 @@ class Guardian:
         self._static_level_bbs = None
         
         self.min_eval_traj_extent = 2.0
-        self.path_block_area_threshold = 0.50
+        self.path_block_area_threshold = 1.5
         self.path_block_near_distance = 2.75
-        self.hold_frames_after_block = 6
-        self.block_memory_frames_after_seen = 80
+        self.hold_frames_after_block = 12
+        self.block_memory_frames_after_seen = 100
         self.min_new_block_speed = 0.50
         self.fast_block_speed = 2.00
-        self.path_block_confirm_frames = 2
+        self.path_block_confirm_frames = 3
         self.emergency_decel_threshold = 3.5
-        self.close_block_base_distance = 4.0
-        self.close_block_time_headway = 0.8
+        self.close_block_base_distance = 5.0
+        self.close_block_time_headway = 1.0
         
         self._hold_frames = 0
         self._block_memory_frames = 0
@@ -528,7 +528,7 @@ class Guardian:
         
         path_blocked = (
             max_area >= self.path_block_area_threshold
-            or (max_area > 0.0 and min_distance <= self.path_block_near_distance)
+            # or (max_area > 0.0 and min_distance <= self.path_block_near_distance)
         )
         
         return {
@@ -540,7 +540,7 @@ class Guardian:
         }
     
     def evaluate(self, traj, ego_transform, speed, ego_actor=None):
-        """Main evaluation function."""
+        """Main evaluation function with spatial persistence."""
         self._draw_counter += 1
         self._refresh_ego_geometry(ego_actor)
         
@@ -563,15 +563,17 @@ class Guardian:
             local_occ = self._grid_to_local(occupied)
             dists = np.linalg.norm(local_occ, axis=1)
             
-            # Forward occupancy is more urgent than equally close rear/side occupancy.
-            forward_bias = np.maximum(local_occ[:, 0], 0.0) * 0.25
-            effective_dists = dists - forward_bias
-            min_dist = max(float(effective_dists.min()), 0.5)
+            # Focus on FORWARD obstacles only
+            forward_obstacles = local_occ[local_occ[:, 0] > 0.0]  # Only forward direction
+            if len(forward_obstacles) > 0:
+                forward_dists = np.linalg.norm(forward_obstacles, axis=1)
+                min_dist = max(float(forward_dists.min()), 0.5)
+            else:
+                min_dist = 99.0
         else:
             min_dist = 99.0
         
-        # Required deceleration is path-constrained. Generic nearest occupancy
-        # pixels are logged, but they are too noisy to command braking.
+        # Required deceleration
         decel_dist = path_block['blocker_distance'] if path_block['path_blocked'] else 50.0
         req_decel = (speed_value ** 2) / (2 * max(decel_dist, 1.0)) if speed_value > 0.5 and decel_dist < 50 else 0.0
         req_decel = min(req_decel, 8.0)
@@ -582,54 +584,42 @@ class Guardian:
         Gc, gc_terms = self._compute_gc_score(overlap_ratio, min_dist, req_decel)
         Gc = max(Gc, cri_score)
         
-        geometry_blocked = path_block['path_blocked']
-        imminent_block = (
+        # ========== STATE MACHINE INTERVENTION LOGIC ==========
+        
+        # Detect NEW threat (high confidence required)
+        new_threat_detected = (
             path_block['path_blocked']
-            and (
-                path_block['blocker_distance'] <= (
-                    self.close_block_base_distance
-                    + self.close_block_time_headway * max(speed_value, 0.0)
-                )
-                or req_decel >= self.emergency_decel_threshold
-            )
+            and path_block['blocker_distance'] < 8.0  # Within 8m
+            and speed_value > 0.5  # Car is moving
         )
         
-        if geometry_blocked:
+        # Track consecutive threat detections
+        if new_threat_detected:
             self._path_block_confirmations += 1
         else:
-            self._path_block_confirmations = 0
+            self._path_block_confirmations = 0  # Reset immediately when clear
         
-        # Do not arm a brake hold from a standstill-only prediction. VAD can emit
-        # unstable full-length plans while the ego is stationary, which made a
-        # single false blocker latch the Guardian forever.
-        moving_confirmed_block = (
-            imminent_block
-            and speed_value > self.min_new_block_speed
-            and (
-                speed_value >= self.fast_block_speed
-                or self._path_block_confirmations >= self.path_block_confirm_frames
-            )
-        )
+        # START braking only after multiple consecutive detections
+        confirmed_new_threat = self._path_block_confirmations >= 3
         
-        held_confirmed_block = (
-            eval_traj_held
-            and imminent_block
-            and self._block_memory_frames > 0
-        )
+        if confirmed_new_threat and self._hold_frames == 0:
+            # START new intervention
+            self._hold_frames = 30  # 1.5 seconds at 20Hz
+            print(f"[Guardian] NEW THREAT at {path_block['blocker_distance']:.1f}m - STARTING brake hold")
         
-        if moving_confirmed_block or held_confirmed_block:
-            self._hold_frames = self.hold_frames_after_block
-            self._block_memory_frames = self.block_memory_frames_after_seen
-            Gc = max(Gc, 1.0)
-        else:
-            self._hold_frames = max(0, self._hold_frames - 1)
-            self._block_memory_frames = max(0, self._block_memory_frames - 1)
-            if speed_value <= self.min_new_block_speed and not eval_traj_held:
+        # CONTINUE braking if already holding
+        if self._hold_frames > 0:
+            # Only release if:
+            # 1. Obstacle is clearly gone
+            
+            obstacle_cleared = min_dist > 15.0 and not path_block['path_blocked']
+            
+            if obstacle_cleared:
                 self._hold_frames = 0
-        
-        intervene = moving_confirmed_block or held_confirmed_block or (
-            self._hold_frames > 0 and speed_value > self.min_new_block_speed
-        )
+                print(f"[Guardian] Obstacle cleared - RELEASING brake hold")
+
+        intervene = self._hold_frames > 0
+        # ========== END INTERVENTION LOGIC ==========
         
         # Visualization
         if self._draw_counter % self.debug_draw_interval == 0:

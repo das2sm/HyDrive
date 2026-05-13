@@ -1356,6 +1356,11 @@ class V13LatLonTrajDecoder(object):
             output[b]["lat_reg_final"] = lat_reg[b, row].cpu()
             output[b]["lon_reg"] = lon_reg[b].cpu()
             output[b]["lon_reg_final"] = lon_reg[b, col].cpu()
+
+            # Add more
+            output[b]["traj_reg"] = traj_reg[b].cpu()
+            output[b]["traj_cls"] = traj_cls[b].cpu()
+            
             output[b]["traj_final"] = traj_reg[b, traj_mode_idx[b]].cpu()
         
         return output

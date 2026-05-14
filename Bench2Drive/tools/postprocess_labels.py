@@ -1,0 +1,232 @@
+"""
+postprocess_labels.py
+
+Offline future-conditioned label generation for temporal divergence research.
+
+This script:
+1. Loads a raw logged route file from DivergenceLogger
+2. Computes future-conditioned labels:
+    - future_collision
+    - future_near_miss
+    - time_to_collision
+    - time_to_near_miss
+3. Saves a processed dataset file
+
+Usage:
+    python postprocess_labels.py \
+        --input logs/route_01.pkl \
+        --output processed/route_01_processed.pkl
+"""
+
+import argparse
+import pickle
+from pathlib import Path
+
+
+FPS = 20
+HORIZON_SECONDS = 3.0
+FUTURE_WINDOW = int(FPS * HORIZON_SECONDS)
+
+NEAR_MISS_DISTANCE = 1.5
+MIN_SPEED_FOR_NEAR_MISS = 1.0
+
+
+def compute_future_labels(timesteps):
+    """
+    Adds future-conditioned labels to each timestep.
+
+    For timestep t:
+        future_collision:
+            True if collision occurs within next 3 seconds
+
+        future_near_miss:
+            True if near miss occurs within next 3 seconds
+            and no collision occurs first
+
+        time_to_collision:
+            Seconds until collision (None if no collision)
+
+        time_to_near_miss:
+            Seconds until near miss (None if no near miss)
+    """
+
+    total_steps = len(timesteps)
+
+    for i in range(total_steps):
+
+        end_idx = min(i + FUTURE_WINDOW, total_steps)
+
+        future_collision = False
+        future_near_miss = False
+
+        collision_frames = None
+        near_miss_frames = None
+
+        # ============================================================
+        # Search future horizon
+        # ============================================================
+
+        for j in range(i, end_idx):
+
+            step_data = timesteps[j]
+
+            # --------------------------------------------------------
+            # Collision detection
+            # --------------------------------------------------------
+
+            if step_data["collision"]:
+
+                future_collision = True
+
+                if collision_frames is None:
+                    collision_frames = j - i
+
+                # Collision dominates near miss
+                break
+
+            # --------------------------------------------------------
+            # Near miss detection
+            # --------------------------------------------------------
+
+            min_distance = step_data.get("min_distance", 999.0)
+            ego_speed = step_data.get("ego_speed", 0.0)
+
+            near_miss_condition = (
+                min_distance < NEAR_MISS_DISTANCE
+                and ego_speed > MIN_SPEED_FOR_NEAR_MISS
+            )
+
+            if near_miss_condition:
+
+                future_near_miss = True
+
+                if near_miss_frames is None:
+                    near_miss_frames = j - i
+
+        # ============================================================
+        # Convert frame counts to seconds
+        # ============================================================
+
+        if collision_frames is not None:
+            time_to_collision = collision_frames / FPS
+        else:
+            time_to_collision = None
+
+        if near_miss_frames is not None:
+            time_to_near_miss = near_miss_frames / FPS
+        else:
+            time_to_near_miss = None
+
+        # ============================================================
+        # Attach labels
+        # ============================================================
+
+        timesteps[i]["future_collision"] = future_collision
+        timesteps[i]["future_near_miss"] = (
+            future_near_miss and not future_collision
+        )
+
+        timesteps[i]["time_to_collision"] = time_to_collision
+        timesteps[i]["time_to_near_miss"] = time_to_near_miss
+
+    return timesteps
+
+
+def print_statistics(timesteps):
+
+    num_collision = sum(
+        t["future_collision"]
+        for t in timesteps
+    )
+
+    num_near_miss = sum(
+        t["future_near_miss"]
+        for t in timesteps
+    )
+
+    num_safe = len(timesteps) - num_collision - num_near_miss
+
+    print("\n========== Dataset Statistics ==========")
+    print(f"Total timesteps:      {len(timesteps)}")
+    print(f"Future collisions:    {num_collision}")
+    print(f"Future near misses:   {num_near_miss}")
+    print(f"Safe:                 {num_safe}")
+
+    if len(timesteps) > 0:
+        print(f"Collision ratio:      {num_collision / len(timesteps):.4f}")
+        print(f"Near miss ratio:      {num_near_miss / len(timesteps):.4f}")
+
+    print("========================================\n")
+
+
+def main():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--input",
+        type=str,
+        required=True,
+        help="Path to raw route pickle file"
+    )
+
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="Path to processed output pickle file"
+    )
+
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
+    output_path = Path(args.output)
+
+    print(f"\nLoading: {input_path}")
+
+    with open(input_path, "rb") as f:
+        data = pickle.load(f)
+
+    timesteps = data["timesteps"]
+
+    print(f"Loaded {len(timesteps)} timesteps")
+
+    # ================================================================
+    # Compute future-conditioned labels
+    # ================================================================
+
+    timesteps = compute_future_labels(timesteps)
+
+    # ================================================================
+    # Print statistics
+    # ================================================================
+
+    print_statistics(timesteps)
+
+    # ================================================================
+    # Save processed dataset
+    # ================================================================
+
+    processed_data = {
+        "timesteps": timesteps,
+        "config": data.get("config", {}),
+        "label_config": {
+            "fps": FPS,
+            "future_window_frames": FUTURE_WINDOW,
+            "future_window_seconds": HORIZON_SECONDS,
+            "near_miss_distance": NEAR_MISS_DISTANCE,
+            "min_speed_for_near_miss": MIN_SPEED_FOR_NEAR_MISS,
+        }
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "wb") as f:
+        pickle.dump(processed_data, f)
+
+    print(f"\nSaved processed dataset:")
+    print(output_path)
+
+
+if __name__ == "__main__":
+    main()

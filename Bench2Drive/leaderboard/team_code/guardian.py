@@ -22,8 +22,8 @@ class Guardian:
         self.debug = debug
         
         # Grid settings
-        self.grid_size = 240                    # Larger grid for better side coverage
-        self.resolution = 0.4                   # meters per pixel (finer than before)
+        self.grid_size = 120                    # Larger grid for better side coverage
+        self.resolution = 0.5                  # meters per pixel (finer than before)
         self.origin = self.grid_size // 2
         
         # === Configurable Safety Margins ===
@@ -54,6 +54,12 @@ class Guardian:
         self._block_memory_frames = 0
         self._path_block_confirmations = 0
         self._last_valid_traj = None
+
+        self.expensive_step_interval = 3   # compute every 3 steps
+        self._step_counter = 0
+
+        self.skip_cri = True
+        self.skip_path_blockage = True
         
         settings = self.world.get_settings() if self.world is not None else None
         self.fixed_delta_seconds = (
@@ -401,9 +407,11 @@ class Guardian:
         # Slight dilation on obstacles
         occ_grid = cv2.dilate(occ_grid.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(np.float32)
         
+        '''
         if self.debug:
             print(f"Guardian -> {actor_count} actors, {static_count} static boxes rasterized")
-        
+        '''
+
         return occ_grid, {'actor_count': actor_count + static_count, 'source': 'carla_oracle'}
     
     def _swept_footprint_polygons(self, traj):
@@ -540,92 +548,89 @@ class Guardian:
         }
     
     def evaluate(self, traj, ego_transform, speed, ego_actor=None):
-        """Main evaluation function with spatial persistence."""
+        """Lightweight evaluation for research logging."""
         self._draw_counter += 1
         self._refresh_ego_geometry(ego_actor)
-        
         speed_value = float(np.asarray(speed).reshape(-1)[0])
         
         eval_traj, eval_traj_held = self._select_eval_trajectory(traj, speed_value)
         
-        occ_grid, occ_meta = self.build_carla_occupancy(ego_transform)
-        ego_swept = self.build_ego_swept_mask(eval_traj, ego_yaw=ego_transform.rotation.yaw)
-        path_block = self._compute_path_blockage(eval_traj, ego_transform)
+        # ----- 1. Lazy occupancy (expensive, but cached) -----
+        self._step_counter += 1
+        if self._step_counter % self.expensive_step_interval == 0:
+            occ_grid, occ_meta = self.build_carla_occupancy(ego_transform)
+            self._cached_occ_grid = occ_grid
+            self._cached_occ_meta = occ_meta
+        else:
+            occ_grid = getattr(self, '_cached_occ_grid', np.zeros((self.grid_size, self.grid_size)))
+            occ_meta = getattr(
+                self,
+                '_cached_occ_meta',
+                {
+                    'source': 'cached',
+                    'actor_count': 0
+                }
+            )
         
-        # Overlap ratio
+        # ----- 2. Swept volume mask (fast) -----
+        ego_swept = self.build_ego_swept_mask(eval_traj, ego_yaw=ego_transform.rotation.yaw)
         overlap = (ego_swept * occ_grid).sum()
         total = ego_swept.sum() + 1e-8
         overlap_ratio = overlap / total
         
-        # Minimum distance with forward bias
+        # ----- 3. Forward minimum distance (cheap on occupancy grid) -----
         occupied = np.argwhere(occ_grid > 0.5)
         if len(occupied) > 0:
             local_occ = self._grid_to_local(occupied)
-            dists = np.linalg.norm(local_occ, axis=1)
-            
-            # Focus on FORWARD obstacles only
-            forward_obstacles = local_occ[local_occ[:, 0] > 0.0]  # Only forward direction
+            forward_obstacles = local_occ[local_occ[:, 0] > 0.0]
             if len(forward_obstacles) > 0:
-                forward_dists = np.linalg.norm(forward_obstacles, axis=1)
-                min_dist = max(float(forward_dists.min()), 0.5)
+                min_dist = float(np.linalg.norm(forward_obstacles, axis=1).min())
             else:
                 min_dist = 99.0
         else:
             min_dist = 99.0
         
-        # Required deceleration
+        # ----- 4. TTC (simplified) -----
+        if speed_value > 0.5 and min_dist < 50:
+            ttc = min_dist / max(speed_value, 0.1)
+        else:
+            ttc = 99.0
+        
+        # ----- 5. Skip expensive CRI and path blockage -----
+        if self.skip_cri:
+            cri_score = 0.0
+            cri_direction = 'none'
+        else:
+            cri_score, cri_direction = self._compute_cri(ego_transform, speed_value)
+        
+        if self.skip_path_blockage:
+            path_block = {
+                'path_blocked': False,
+                'path_blockage_area': 0.0,
+                'blocker_distance': min_dist,   # reuse min_dist
+                'blocker_type': 'none',
+                'blocker_direction': 'none'
+            }
+        else:
+            path_block = self._compute_path_blockage(eval_traj, ego_transform)
+        
+        # ----- 6. Risk score (optional, not used for logging) -----
         decel_dist = path_block['blocker_distance'] if path_block['path_blocked'] else 50.0
         req_decel = (speed_value ** 2) / (2 * max(decel_dist, 1.0)) if speed_value > 0.5 and decel_dist < 50 else 0.0
         req_decel = min(req_decel, 8.0)
-        
-        cri_score, cri_direction = self._compute_cri(ego_transform, speed_value)
-        
-        # Risk score
         Gc, gc_terms = self._compute_gc_score(overlap_ratio, min_dist, req_decel)
-        Gc = max(Gc, cri_score)
+        if not self.skip_cri:
+            Gc = max(Gc, cri_score)
         
-        # ========== STATE MACHINE INTERVENTION LOGIC ==========
+        # ----- 7. Intervention logic (you may keep or disable) -----
+        intervene = False   # we don't need it for research dataset
+        # If you still want intervention, keep the state machine, but it's not needed.
         
-        # Detect NEW threat (high confidence required)
-        new_threat_detected = (
-            path_block['path_blocked']
-            and path_block['blocker_distance'] < 8.0  # Within 8m
-            and speed_value > 0.5  # Car is moving
-        )
-        
-        # Track consecutive threat detections
-        if new_threat_detected:
-            self._path_block_confirmations += 1
-        else:
-            self._path_block_confirmations = 0  # Reset immediately when clear
-        
-        # START braking only after multiple consecutive detections
-        confirmed_new_threat = self._path_block_confirmations >= 3
-        
-        if confirmed_new_threat and self._hold_frames == 0:
-            # START new intervention
-            self._hold_frames = 30  # 1.5 seconds at 20Hz
-            print(f"[Guardian] NEW THREAT at {path_block['blocker_distance']:.1f}m - STARTING brake hold")
-        
-        # CONTINUE braking if already holding
-        if self._hold_frames > 0:
-            # Only release if:
-            # 1. Obstacle is clearly gone
-            
-            obstacle_cleared = min_dist > 15.0 and not path_block['path_blocked']
-            
-            if obstacle_cleared:
-                self._hold_frames = 0
-                print(f"[Guardian] Obstacle cleared - RELEASING brake hold")
-
-        intervene = self._hold_frames > 0
-        # ========== END INTERVENTION LOGIC ==========
-        
-        # Visualization
-        if self._draw_counter % self.debug_draw_interval == 0:
+        # ----- 8. Visualisation (reduce frequency) -----
+        if self.debug and self._draw_counter % max(self.debug_draw_interval, 10) == 0:
             self.visualize_in_carla(eval_traj, ego_transform, ego_actor=ego_actor, intervene=intervene)
         
-        # Logging
+        # ----- 9. Logging (kept for divergence analysis) -----
         ego_pos = np.array([ego_transform.location.x, ego_transform.location.y])
         ego_yaw_rad = np.deg2rad(ego_transform.rotation.yaw)
         
@@ -634,7 +639,7 @@ class Guardian:
             'ego_speed': speed_value,
             'overlap_ratio': overlap_ratio,
             'min_occupied_distance': min_dist,
-            'ttc_occupied': 99.0,
+            'ttc_occupied': ttc,                     # store real TTC
             'req_decel': req_decel,
             'gc_score': Gc,
             **gc_terms,
@@ -646,12 +651,17 @@ class Guardian:
             'blocker_type': path_block['blocker_type'],
             'eval_traj_held': int(eval_traj_held),
             'occupancy_source': occ_meta['source'],
-            'intervention_flag': int(intervene),
-            'brake_command': 1.0 if intervene else 0.0,
-            'actor_count': occ_meta['actor_count']
+            'intervention_flag': 0,                  # disabled
+            'brake_command': 0.0,
+            'actor_count': occ_meta.get('actor_count', 0)
         })
         
-        return intervene, (1.0 if intervene else 0.0)
+        self.latest_occ_grid = occ_grid
+        self.latest_occ_meta = occ_meta
+        self.latest_min_dist = min_dist
+        self.latest_ttc = ttc
+
+        return False, 0.0   # never intervene
     
     def _compute_gc_score(self, overlap_ratio, min_dist, req_decel):
         overlap_score = min(overlap_ratio * 1.1, 0.65)

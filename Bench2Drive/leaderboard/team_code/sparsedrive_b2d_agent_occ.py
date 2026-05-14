@@ -18,6 +18,7 @@ from team_code.pid_controller import PIDController
 from team_code.planner import RoutePlanner
 from team_code.guardian import Guardian  # ← GUARDIAN IMPORT
 from team_code.divergence_logger import DivergenceLogger  # ← DIVERGENCE LOGGER IMPORT
+from team_code.collision_sensor import CollisionSensor
 
 from leaderboard.autoagents import autonomous_agent
 from leaderboard.utils.route_manipulation import _get_latlon_ref
@@ -155,7 +156,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         self.visualizer = Visualizer(plot_choices, self.save_path, planning_key=cfg.get("anchor_reference_group", "spatial"))
         
         # ========== GUARDIAN INITIALIZATION ==========
-        self.use_guardian = False  # Toggle to enable/disable Guardian
+        self.use_guardian = True  # Toggle to enable/disable Guardian
         if self.use_guardian:
             self.guardian = Guardian(
                 world=None,  # Will be set in _init()
@@ -175,6 +176,10 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         )
         print("[SparseDrive] Divergence logger initialized")
         # =======================================
+
+        self.collision_sensor = None  # Will be initialized in _init() when we have access to the world and ego actor   
+        self.collision_latched = False
+        self.near_miss_cooldown = 0 
    
         self.lidar2cam = {
         'CAM_FRONT':np.array([[ 1.  ,  0.  ,  0.  ,  0.  ],
@@ -421,32 +426,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
             'ego2global': ego2global,
             'global2ego': global2ego,
         }
-        
-        collision_occurred = False
-        collision_type = None      # store type identifier: 'vehicle', 'pedestrian', 'layout'
-        
-        if 'COLLISION' in input_data:
-            # input_data['COLLISION'] is a list of CollisionEvent for this frame
-            for collision_event in input_data['COLLISION']:
-                collision_occurred = True
-                # Get type info from collision_event.other_actor
-                other = collision_event.other_actor
-                if other is not None:
-                    type_id = other.type_id
-                    if 'vehicle' in type_id:
-                        collision_type = 'vehicle'
-                        break
-                    elif 'walker' in type_id:
-                        collision_type = 'pedestrian'
-                        break
-                    else:
-                        collision_type = 'layout'
-                else:
-                    collision_type = 'layout'
-        
-        # Append to result dict
-        result['collision'] = collision_occurred
-        result['collision_type'] = collision_type
+
         return result
     
     @torch.no_grad()
@@ -587,6 +567,9 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
             print(f"[ERROR] 'traj_final' not found in output keys: {output.keys()}")
 
         # ========== EXTRACT EGO MULTI-MODAL PLANNER DISTRIBUTION ==========
+        planner_trajs = None
+        planner_scores = None
+
         if 'traj_reg' not in output or 'traj_cls' not in output:
             print(f"[ERROR] Planner trajectory or scores not found in output. Keys: {output.keys()}")
 
@@ -624,44 +607,17 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
 
         # ========== GET EGO STATE FOR GUARDIAN ==========
         ego_actor = CarlaDataProvider.get_hero_actor()
+        if self.collision_sensor is None and ego_actor is not None:
+            self.collision_sensor = CollisionSensor(ego_actor)
+            print("[CollisionSensor] Attached to ego vehicle")
         ego_transform = ego_actor.get_transform()
         ego_speed = tick_data['speed']
         
         # ========== COMPUTE OCCUPANCY AND BASELINE SIGNALS ==========
-        if self.guardian is not None:
-            # Get occupancy grid from Guardian
-            occ_grid, occ_meta = self.guardian.build_carla_occupancy(ego_transform)
-            
-            # Compute minimum distance to forward obstacles
-            occupied = np.argwhere(occ_grid > 0.5)
-            if len(occupied) > 0:
-                local_occ = self.guardian._grid_to_local(occupied)
-                # Only consider forward obstacles (forward = positive in first column)
-                forward_obstacles = local_occ[local_occ[:, 0] > 0.0]
-                if len(forward_obstacles) > 0:
-                    min_dist = float(np.linalg.norm(forward_obstacles, axis=1).min())
-                else:
-                    min_dist = 999.0
-            else:
-                min_dist = 999.0
-            
-            # Compute TTC (simplified)
-            if ego_speed > 0.5 and min_dist < 50:
-                ttc = min_dist / max(ego_speed, 0.1)
-            else:
-                ttc = 999.0
-        else:
-            # No Guardian - create dummy occupancy
-            occ_grid = np.zeros((240, 240), dtype=np.float32)
-            min_dist = 999.0
-            ttc = 999.0
-            occ_meta = {'source': 'none', 'actor_count': 0}
-
-        # ========== APPLY GUARDIAN INTERVENTION ==========
         guardian_intervene = False
         guardian_brake = 0.0
-        
-        if self.guardian is not None and self.use_guardian:
+
+        if self.guardian is not None:
             try:
                 guardian_intervene, guardian_brake = self.guardian.evaluate(
                     traj=sparsedrive_traj,
@@ -669,49 +625,90 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                     speed=ego_speed,
                     ego_actor=ego_actor
                 )
+
+                # Pull cached metrics from Guardian
+                occ_grid = self.guardian.latest_occ_grid
+                occ_meta = self.guardian.latest_occ_meta
+                min_dist = self.guardian.latest_min_dist
+                ttc = self.guardian.latest_ttc
+
+                # Disable intervention unless explicitly enabled
+                if not self.use_guardian:
+                    guardian_intervene = False
+                    guardian_brake = 0.0
+
             except Exception as e:
                 print(f"[Guardian ERROR] {e}")
                 import traceback
                 traceback.print_exc()
+
+                occ_grid = np.zeros((120,120), dtype=np.float32)
+                min_dist = 999.0
+                ttc = 999.0
+                occ_meta = {'source': 'error', 'actor_count': 0}
+
+        else:
+            occ_grid = np.zeros((120,120), dtype=np.float32)
+            min_dist = 999.0
+            ttc = 999.0
+            occ_meta = {'source': 'none', 'actor_count': 0}
         
         # ========== DETECT COLLISION/NEAR-MISS ==========
-        '''
-        collision_occurred = tick_data.get('collision', False)
-        collision_type = tick_data.get('collision_type', None)
-        '''
-
-        # TODO
         collision_occurred = False
-        near_miss = False
+        collision_type = None
 
-        '''
-        near_miss = (min_dist < 1.5) and (ego_speed > 1.0) and (not collision_occurred)
+        if (
+            self.collision_sensor is not None and
+            self.collision_sensor.has_collision() and
+            not self.collision_latched
+        ):
+            collision_occurred = True
+            self.collision_latched = True
 
-        if collision_occurred:
-            print(f"Collision detected with {collision_type}")
-        elif near_miss:
-            print("Near miss detected: Obstacle within 1.5m at speed > 1.0 m/s")    
-        '''
-        # ========== LOG DIVERGENCE DATA ==========
-        self.divergence_logger.log_timestep(
-            planner_trajs=planner_trajs,      # (K, T, 2) - multiple trajectory modes
-            planner_scores=planner_scores,       # (K,) - probability weights
-            occupancy_grid=occ_grid,          # (H, W) - BEV occupancy
-            ego_transform=ego_transform,      # CARLA transform
-            ego_speed=ego_speed,              # float
-            ttc=ttc,                          # float
-            min_distance=min_dist,            # float
-            collision=collision_occurred,              # bool
-            near_miss=near_miss,              # bool
-            metadata={
-                'route_step': self.step,
-                'command': command,
-                'guardian_intervene': guardian_intervene,
-                'occupancy_source': occ_meta.get('source', 'unknown'),
-                'num_actors': occ_meta.get('actor_count', 0),
-                'planner_modes': planner_trajs.shape[0]
-            }
+        if self.near_miss_cooldown > 0:
+            self.near_miss_cooldown -= 1
+
+        near_miss = (
+            min_dist < 1.5 and
+            ego_speed > 1.0 and
+            not collision_occurred and
+            self.near_miss_cooldown == 0
         )
+
+        if near_miss:
+            self.near_miss_cooldown = 20  # ~1 second
+
+        if near_miss:
+            print(
+                f"[NearMiss] "
+                f"distance={min_dist:.2f}m "
+                f"speed={ego_speed:.2f}m/s"
+            )
+
+        # ========== LOG DIVERGENCE DATA ==========
+        if planner_trajs is not None and planner_scores is not None:
+            self.divergence_logger.log_timestep(
+                planner_trajs=planner_trajs,      # (K, T, 2) - multiple trajectory modes
+                planner_scores=planner_scores,       # (K,) - probability weights
+                occupancy_grid=occ_grid,          # (H, W) - BEV occupancy
+                ego_transform=ego_transform,      # CARLA transform
+                ego_speed=ego_speed,              # float
+                ttc=ttc,                          # float
+                min_distance=min_dist,            # float
+                collision=collision_occurred,              # bool
+                near_miss=near_miss,              # bool
+                metadata={
+                    'route_step': self.step,
+                    'command': command,
+                    'guardian_intervene': guardian_intervene,
+                    'occupancy_source': occ_meta.get('source', 'unknown'),
+                    'num_actors': occ_meta.get('actor_count', 0),
+                    'planner_modes': planner_trajs.shape[0],
+                    'collision_type': collision_type if collision_occurred else 'none'
+                }
+            )
+        else:
+            print(f"[Divergence Logger] Missing planner trajectories or scores at step {self.step}. Skipping log.")
         
         # ========== NORMAL PID CONTROL ==========
         steer_traj, throttle_traj, brake_traj, metadata_traj = self.pidcontroller.control_pid(
@@ -779,13 +776,52 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         outfile.close()
     
     def destroy(self):
-        # Save divergence log before cleanup
-        route_name = f"route_{self.save_name}"
-        self.divergence_logger.save_route(route_name)
+        """
+        Cleans up the agent and all attached sensors safely.
+        """
+        # 1. DATA PRESERVATION (First priority)
+        try:
+            route_name = f"route_{self.save_name}"
+            self.divergence_logger.save_route(route_name)
+        except Exception as e:
+            print(f"[Agent] Failed to save divergence logs: {e}")
+        
+        # 2. SENSOR CLEANUP
+        if hasattr(self, 'collision_sensor') and self.collision_sensor is not None:
+            try:
+                self.collision_sensor.destroy()
+            except RuntimeError as e:
+                # Expected if CARLA world is already shutting down
+                print(f"[Agent] Sensor cleanup (expected during shutdown): {e}")
+            except Exception as e:
+                print(f"[Agent] Error during sensor cleanup: {e}")
+            finally:
+                self.collision_sensor = None
 
-        del self.model
+        # 3. STATE RESET
+        self.collision_latched = False
+        self.near_miss_cooldown = 0
+
+        # 4. MEMORY MANAGEMENT (Preventing GPU/RAM leaks)
+        if hasattr(self, 'model'):
+            try:
+                # Move to CPU before deleting to ensure VRAM is released properly
+                self.model.cpu()
+                del self.model
+            except Exception:
+                pass
+        
+        # Force CUDA to drop the cleared tensors
         torch.cuda.empty_cache()
-        self.visualizer.image2video()
+
+        # 5. VISUALIZATION EXPORT
+        # Do this last as it's the most CPU-intensive non-CARLA task
+        try:
+            self.visualizer.image2video()
+        except Exception as e:
+            print(f"[Agent] Video export failed: {e}")
+
+        # print(f"=== [Agent] Finished cleanup for {self.save_name} ===")
     
     def gps_to_location(self, gps):
         EARTH_RADIUS_EQUA = 6378137.0

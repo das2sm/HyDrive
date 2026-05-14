@@ -86,21 +86,13 @@ class DivergenceLogger:
             }, f)
         
         print(f"[DivergenceLogger] Saved {len(self.timesteps)} timesteps to {output_file}")
-        
-        # Also save JSON summary for quick inspection
+
         summary = {
             'route_name': route_name,
             'total_steps': len(self.timesteps),
             'collisions': sum(t['collision'] for t in self.timesteps),
             'near_misses': sum(t['near_miss'] for t in self.timesteps)
         }
-        
         summary_file = self.log_dir / f"{route_name}_summary.json"
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2)
-    
-    # Not being used anywhere?
-    def reset(self):
-        """Clear logged data for next route."""
-        self.timesteps = []
-        self.step = 0

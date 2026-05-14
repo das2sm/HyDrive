@@ -69,7 +69,7 @@ class CollisionSensor:
             try:
                 self.sensor.stop()
                 self.sensor.destroy()
-            except:
+            except Exception:
                 pass  # Silently ignore all errors
             finally:
                 self.sensor = None

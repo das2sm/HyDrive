@@ -7,9 +7,7 @@ This script:
 1. Loads a raw logged route file from DivergenceLogger
 2. Computes future-conditioned labels:
     - future_collision
-    - future_near_miss
     - time_to_collision
-    - time_to_near_miss
 3. Saves a processed dataset file
 
 Usage:
@@ -27,9 +25,6 @@ FPS = 20
 HORIZON_SECONDS = 3.0
 FUTURE_WINDOW = int(FPS * HORIZON_SECONDS)
 
-NEAR_MISS_DISTANCE = 1.5
-MIN_SPEED_FOR_NEAR_MISS = 1.0
-
 
 def compute_future_labels(timesteps):
     """
@@ -39,15 +34,8 @@ def compute_future_labels(timesteps):
         future_collision:
             True if collision occurs within next 3 seconds
 
-        future_near_miss:
-            True if near miss occurs within next 3 seconds
-            and no collision occurs first
-
         time_to_collision:
             Seconds until collision (None if no collision)
-
-        time_to_near_miss:
-            Seconds until near miss (None if no near miss)
     """
 
     total_steps = len(timesteps)
@@ -57,104 +45,41 @@ def compute_future_labels(timesteps):
         end_idx = min(i + FUTURE_WINDOW, total_steps)
 
         future_collision = False
-        future_near_miss = False
-
         collision_frames = None
-        near_miss_frames = None
 
-        # ============================================================
         # Search future horizon
-        # ============================================================
-
         for j in range(i, end_idx):
-
             step_data = timesteps[j]
 
-            # --------------------------------------------------------
             # Collision detection
-            # --------------------------------------------------------
-
             if step_data["collision"]:
-
                 future_collision = True
-
                 if collision_frames is None:
                     collision_frames = j - i
+                break  # stop at first collision
 
-                # Collision dominates near miss
-                break
-
-            # --------------------------------------------------------
-            # Near miss detection
-            # --------------------------------------------------------
-
-            min_distance = step_data.get("min_distance", 999.0)
-            ego_speed = step_data.get("ego_speed", 0.0)
-
-            near_miss_condition = (
-                min_distance < NEAR_MISS_DISTANCE
-                and ego_speed > MIN_SPEED_FOR_NEAR_MISS
-            )
-
-            if near_miss_condition:
-
-                future_near_miss = True
-
-                if near_miss_frames is None:
-                    near_miss_frames = j - i
-
-        # ============================================================
         # Convert frame counts to seconds
-        # ============================================================
+        time_to_collision = collision_frames / FPS if collision_frames is not None else None
 
-        if collision_frames is not None:
-            time_to_collision = collision_frames / FPS
-        else:
-            time_to_collision = None
-
-        if near_miss_frames is not None:
-            time_to_near_miss = near_miss_frames / FPS
-        else:
-            time_to_near_miss = None
-
-        # ============================================================
         # Attach labels
-        # ============================================================
-
         timesteps[i]["future_collision"] = future_collision
-        timesteps[i]["future_near_miss"] = (
-            future_near_miss and not future_collision
-        )
-
         timesteps[i]["time_to_collision"] = time_to_collision
-        timesteps[i]["time_to_near_miss"] = time_to_near_miss
 
     return timesteps
 
 
 def print_statistics(timesteps):
 
-    num_collision = sum(
-        t["future_collision"]
-        for t in timesteps
-    )
-
-    num_near_miss = sum(
-        t["future_near_miss"]
-        for t in timesteps
-    )
-
-    num_safe = len(timesteps) - num_collision - num_near_miss
+    num_collision = sum(t["future_collision"] for t in timesteps)
+    num_safe = len(timesteps) - num_collision
 
     print("\n========== Dataset Statistics ==========")
     print(f"Total timesteps:      {len(timesteps)}")
     print(f"Future collisions:    {num_collision}")
-    print(f"Future near misses:   {num_near_miss}")
     print(f"Safe:                 {num_safe}")
 
     if len(timesteps) > 0:
         print(f"Collision ratio:      {num_collision / len(timesteps):.4f}")
-        print(f"Near miss ratio:      {num_near_miss / len(timesteps):.4f}")
 
     print("========================================\n")
 
@@ -191,22 +116,13 @@ def main():
 
     print(f"Loaded {len(timesteps)} timesteps")
 
-    # ================================================================
-    # Compute future-conditioned labels
-    # ================================================================
-
+    # Compute future-conditioned labels (only collision)
     timesteps = compute_future_labels(timesteps)
 
-    # ================================================================
     # Print statistics
-    # ================================================================
-
     print_statistics(timesteps)
 
-    # ================================================================
     # Save processed dataset
-    # ================================================================
-
     processed_data = {
         "timesteps": timesteps,
         "config": data.get("config", {}),
@@ -214,8 +130,6 @@ def main():
             "fps": FPS,
             "future_window_frames": FUTURE_WINDOW,
             "future_window_seconds": HORIZON_SECONDS,
-            "near_miss_distance": NEAR_MISS_DISTANCE,
-            "min_speed_for_near_miss": MIN_SPEED_FOR_NEAR_MISS,
         }
     }
 

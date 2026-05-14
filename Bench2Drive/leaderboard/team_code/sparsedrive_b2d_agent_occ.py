@@ -36,6 +36,11 @@ from tools.visualization.visualize import Visualizer
 IS_BENCH2DRIVE = os.environ.get('IS_BENCH2DRIVE', None)
 CAMERAS = ['CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT', 'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT']
 
+'''
+“The agent executes at CARLA’s 20 Hz simulation rate (fixed_delta_seconds=0.05). The inherited
+frame_rate=10 variable affects SparseDrive temporal embeddings but not logging cadence or physical
+timestep spacing.”
+'''
 frame_rate = 10
 resize_scale = 0.44
 save_interval = 200
@@ -431,6 +436,8 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
     
     @torch.no_grad()
     def run_step(self, input_data, timestamp):
+        t_step_start = time.perf_counter()  # TIMING: Start of entire step
+        
         if not self.initialized:
             self._init()
         
@@ -555,6 +562,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
             if torch.is_tensor(sparsedrive_traj):
                 sparsedrive_traj = sparsedrive_traj.cpu().numpy()
             
+            '''
             # Debug trajectory
             if self.step % 50 == 0 or self.step < 5:
                 print(f"\n[DEBUG Step {self.step}]")
@@ -562,6 +570,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 print(f"First 3 waypoints:\n{sparsedrive_traj[:3]}")
                 print(f"Max forward extent: {sparsedrive_traj[:, 1].max():.2f}m")
                 print(f"Ego speed: {tick_data['speed']:.2f} m/s")
+            '''
 
         else:
             print(f"[ERROR] 'traj_final' not found in output keys: {output.keys()}")
@@ -586,6 +595,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
 
             assert planner_trajs.shape == (K, 6, 2), f"Wrong shape: {planner_trajs.shape}"
 
+            '''
             if self.step % 50 == 0:
                 print("\n[Divergence Debug]")
                 print(f"Planner modes: {planner_trajs.shape[0]}")
@@ -604,6 +614,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 for i in range(K):
                     endpoint = planner_trajs[i, -1]
                     print(f"  Mode {i} (score={planner_scores[i]:.3f}): [{endpoint[0]:6.2f}, {endpoint[1]:6.2f}]")
+            '''
 
         # ========== GET EGO STATE FOR GUARDIAN ==========
         ego_actor = CarlaDataProvider.get_hero_actor()
@@ -669,7 +680,8 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
             self.near_miss_cooldown -= 1
 
         near_miss = (
-            min_dist < 1.5 and
+            min_dist < 1.0 and
+            ttc < 2.0 and
             ego_speed > 1.0 and
             not collision_occurred and
             self.near_miss_cooldown == 0
@@ -717,7 +729,25 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         
         if brake_traj < 0.05: brake_traj = 0.0
         if throttle_traj > brake_traj: brake_traj = 0.0
-        
+
+        # ========== STUCK RECOVERY ==========
+        # Agent runs at 20Hz; 80 steps ≈ 4s of no movement
+        if ego_speed < 0.1:
+            self.stuck_detector += 1
+        else:
+            self.stuck_detector = 0
+            self.last_moving_step = self.step
+
+        if self.stuck_detector > 80:
+            self.forced_move = 40   # force throttle for ~2s
+            self.stuck_detector = 0
+
+        if self.forced_move > 0:
+            throttle_traj = max(throttle_traj, 0.4)
+            brake_traj = 0.0
+            self.forced_move -= 1
+        # =====================================
+
         # ========== APPLY GUARDIAN OVERRIDE ==========
         if guardian_intervene:
             print(f"[Guardian] 🚨 INTERVENING at step {self.step} - Brake: {guardian_brake:.2f}")
@@ -763,6 +793,13 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 throttle_cmd=control.throttle
             )
         
+        '''
+        # TIMING: Diagnostic (log slow frames)
+        t_step_elapsed = (time.perf_counter() - t_step_start) * 1000  # ms
+        if self.step % 100 == 0 or t_step_elapsed > 50:
+            print(f"[Step {self.step:04d}] Agent frame time: {t_step_elapsed:.1f}ms (CARLA budget: 100ms)")
+        '''
+
         return control
     
     def save(self, tick_data):

@@ -55,11 +55,18 @@ class Guardian:
         self._path_block_confirmations = 0
         self._last_valid_traj = None
 
-        self.expensive_step_interval = 3   # compute every 3 steps
+        self.expensive_step_interval = 5   # compute every 5 steps (was 3, reduced frequency for performance)
         self._step_counter = 0
 
         self.skip_cri = True
         self.skip_path_blockage = True
+        
+        # Performance optimization: cache expensive actor iteration
+        self._cached_occ_grid = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self._cached_occ_meta = {'source': 'init', 'actor_count': 0}
+        self._actor_list_cache = None
+        self._actor_list_cache_age = 0
+        self._actor_list_cache_max_age = 10  # Refresh actor list every 10 frames
         
         settings = self.world.get_settings() if self.world is not None else None
         self.fixed_delta_seconds = (
@@ -354,16 +361,25 @@ class Guardian:
         return self._static_level_bbs
     
     def build_carla_occupancy(self, ego_transform, max_dist=75.0):
-        """Build occupancy grid from CARLA actors."""
+        """Build occupancy grid from CARLA actors (optimized with caching)."""
         occ_grid = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
         ego_pos = np.array([ego_transform.location.x, ego_transform.location.y], dtype=np.float64)
         
         actor_count = 0
         static_count = 0
         
-        for actor in self.world.get_actors():
+        # OPTIMIZATION 1: Cache actor list to avoid fetching every frame
+        self._actor_list_cache_age += 1
+        if self._actor_list_cache is None or self._actor_list_cache_age >= self._actor_list_cache_max_age:
+            try:
+                self._actor_list_cache = list(self.world.get_actors())
+                self._actor_list_cache_age = 0
+            except Exception:
+                self._actor_list_cache = []
+        
+        for actor in self._actor_list_cache:
             # Skip ego
-            if actor.attributes.get('role_name') == 'hero':
+            if hasattr(actor, 'attributes') and actor.attributes.get('role_name') == 'hero':
                 continue
             
             type_id = actor.type_id
@@ -372,8 +388,12 @@ class Guardian:
             
             try:
                 t = actor.get_transform()
-                dist = np.linalg.norm([t.location.x - ego_pos[0], t.location.y - ego_pos[1]])
-                if dist > max_dist:
+                dx = t.location.x - ego_pos[0]
+                dy = t.location.y - ego_pos[1]
+                dist_sq = dx*dx + dy*dy
+                
+                # OPTIMIZATION 2: Use distance check with sqrt only when needed
+                if dist_sq > max_dist * max_dist:
                     continue
                 
                 if self._rasterize_world_vertices(
@@ -385,14 +405,17 @@ class Guardian:
             except Exception:
                 continue
         
+        # Static obstacles (smaller subset)
         for bbox in self._get_static_level_bbs():
             try:
                 loc = bbox.location
                 dx = loc.x - ego_pos[0]
                 dy = loc.y - ego_pos[1]
-                # Use the footprint radius so large static boxes are kept when nearby.
+                dist_sq = dx*dx + dy*dy
+                
+                # Use the footprint radius for pruning
                 radius = max(float(bbox.extent.x), float(bbox.extent.y))
-                if np.linalg.norm([dx, dy]) - radius > max_dist:
+                if np.sqrt(dist_sq) - radius > max_dist:
                     continue
                 
                 if self._rasterize_world_vertices(
@@ -405,12 +428,8 @@ class Guardian:
                 continue
         
         # Slight dilation on obstacles
-        occ_grid = cv2.dilate(occ_grid.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(np.float32)
-        
-        '''
-        if self.debug:
-            print(f"Guardian -> {actor_count} actors, {static_count} static boxes rasterized")
-        '''
+        if actor_count + static_count > 0:
+            occ_grid = cv2.dilate(occ_grid.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(np.float32)
 
         return occ_grid, {'actor_count': actor_count + static_count, 'source': 'carla_oracle'}
     
@@ -578,15 +597,16 @@ class Guardian:
         total = ego_swept.sum() + 1e-8
         overlap_ratio = overlap / total
         
-        # ----- 3. Forward minimum distance (cheap on occupancy grid) -----
-        occupied = np.argwhere(occ_grid > 0.5)
-        if len(occupied) > 0:
-            local_occ = self._grid_to_local(occupied)
-            forward_obstacles = local_occ[local_occ[:, 0] > 0.0]
-            if len(forward_obstacles) > 0:
-                min_dist = float(np.linalg.norm(forward_obstacles, axis=1).min())
-            else:
-                min_dist = 99.0
+        # ----- 3. Path-filtered minimum distance -----
+        conflict_mask = (ego_swept > 0.5) & (occ_grid > 0.5)
+
+        if conflict_mask.any():
+            occupied_conflict = np.argwhere(conflict_mask)
+            local_conflict = self._grid_to_local(occupied_conflict)
+
+            min_dist = float(
+                np.linalg.norm(local_conflict, axis=1).min()
+            )
         else:
             min_dist = 99.0
         
@@ -875,5 +895,5 @@ class Guardian:
                 drawn += 1
                 if drawn >= self.max_debug_boxes:
                     break
-            except:
+            except Exception:
                 continue

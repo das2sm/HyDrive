@@ -2,8 +2,8 @@
 Baseline safety signal computation.
 
 Signals:
-  - ttc_raw:      raw TTC (lower = more dangerous); >= 99s → clipped to max (10s)
-  - dist_raw:     raw min_distance (lower = more dangerous); >= 99m → clipped to max (20m)
+  - ttc_raw:         raw TTC (lower = more dangerous); >= 99s → clipped to max (10s)
+  - dist_raw:        raw min_distance (lower = more dangerous); >= 99m → clipped to max (20m)
   - rss_signal:      binary RSS proxy: TTC < 2.0s AND dist < 3.0m
   - ttc_inv:         1/TTC (higher = more dangerous, comparable to divergence direction)
   - dist_inv:        1/dist
@@ -30,7 +30,7 @@ def compute_baseline_series(timesteps):
     if not timesteps:
         return {k: np.array([], dtype=np.float64) for k in keys}
 
-    # Robust field extraction handling dicts, classes, and explicit Nones
+    # Field extraction handling dicts, classes, and explicit Nones
     def extract_field(key):
         vals = []
         for t in timesteps:
@@ -45,7 +45,7 @@ def compute_baseline_series(timesteps):
     dist_raw = extract_field('min_distance')
     speed = extract_field('ego_speed')
 
-    # 1. Check for truly invalid/missing data (NaNs or negative numbers)
+    # 1. Check for truly invalid/missing data (NaNs, negative numbers or 0)
     ttc_data_present = np.isfinite(ttc_raw) & (ttc_raw > 0)
     dist_data_present = np.isfinite(dist_raw) & (dist_raw > 0)
     valid_mask = ttc_data_present & dist_data_present
@@ -54,12 +54,12 @@ def compute_baseline_series(timesteps):
     ttc_under_sentinel = ttc_raw < TTC_SENTINEL
     dist_under_sentinel = dist_raw < DIST_SENTINEL
 
-    # 3. Clip logic: True hazards get clipped normally. Sentinels/Invalids get safe max.
-    ttc_clipped = np.where(ttc_data_present & ttc_under_sentinel, np.clip(ttc_raw, EPSILON, TTC_CLIP), TTC_CLIP)  
-    dist_clipped = np.where(dist_data_present & dist_under_sentinel, np.clip(dist_raw, EPSILON, DIST_CLIP), DIST_CLIP)  
- 
     hazard_ttc = ttc_data_present & ttc_under_sentinel   # True when a real obstacle is close
     hazard_dist = dist_data_present & dist_under_sentinel
+
+    # 3. Clip logic: True hazards get clipped normally. Sentinels/Invalids get safe max.
+    ttc_clipped = np.where(hazard_ttc, np.clip(ttc_raw, EPSILON, TTC_CLIP), TTC_CLIP)  
+    dist_clipped = np.where(hazard_dist, np.clip(dist_raw, EPSILON, DIST_CLIP), DIST_CLIP)  
 
     # Base inverses (still safe, never infinite)
     ttc_inv = np.where(hazard_ttc, 1.0 / ttc_clipped, 0.0)

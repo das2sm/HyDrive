@@ -18,63 +18,106 @@ GRID_W = 120
 GRID_RANGE = 30.0  # meters, symmetric around ego
 CELL_SIZE = GRID_RANGE * 2 / GRID_H  # 0.5 m/cell
 
-# Trajectory parameters
+# Trajectory
 TRAJ_WAYPOINTS = 6   # T waypoints per trajectory
-EGO_HALF_W = 1.0     # ego vehicle half-width in meters (for footprint rasterization)
 
 
 def _traj_to_bev_coords(trajs):
     """
     Convert ego-frame trajectories (K, T, 2) to BEV pixel coords.
     Ego frame: x=left, y=forward. BEV: row=forward (inverted), col=left.
-    Returns (K, T, 2) integer pixel coords, clipped to grid.
+    Returns (K, T, 2) pixel coords, clipped to [0, GRID_H) x [0, GRID_W).
     """
-    # x=left → col: col = (x + GRID_RANGE) / CELL_SIZE
-    # y=forward → row: row = (GRID_RANGE - y) / CELL_SIZE  (forward = up = low row)
+    # Compute continuous coordinates
     col = (trajs[..., 0] + GRID_RANGE) / CELL_SIZE
     row = (GRID_RANGE - trajs[..., 1]) / CELL_SIZE
-    coords = np.stack([row, col], axis=-1)
+    
+    # Clip to grid bounds [0, GRID_H) x [0, GRID_W)
+    row_clipped = np.clip(row, 0, GRID_H - 1)
+    col_clipped = np.clip(col, 0, GRID_W - 1)
+        
+    coords = np.stack([row_clipped, col_clipped], axis=-1)
     return coords
 
 
-def rasterize_planner(planner_trajs, planner_scores, sigma=4.0):
+def rasterize_planner(planner_trajs, planner_scores, sigma=3.0):
     """
     Rasterize weighted planner trajectories onto a BEV probability grid.
 
-    planner_trajs: (K, T, 2) ego-frame waypoints [left, forward]
-    planner_scores: (K,) probability weights (sum to 1)
-    sigma: Gaussian spread in pixels
+    Args:
+        planner_trajs: (K, T, 2) ego-frame waypoints [left, forward]
+        planner_scores: (K,) probability weights (sum to 1)
+        sigma: Gaussian spread in pixels
 
-    Returns: (H, W) probability grid, sums to 1.
+    Returns:
+        probability_grid: (H, W) normalised probability grid, sums to 1.
     """
-    grid = np.zeros((GRID_H, GRID_W), dtype=np.float64)
-    coords = _traj_to_bev_coords(planner_trajs)  # (K, T, 2)
+    probability_grid = np.zeros((GRID_H, GRID_W), dtype=np.float64)
+    waypoint_coords = _traj_to_bev_coords(planner_trajs)  # (K, T, 2)
 
-    # Precompute Gaussian kernel offsets
-    r = int(np.ceil(3 * sigma))
-    ys, xs = np.mgrid[-r:r+1, -r:r+1]
-    kernel = np.exp(-(ys**2 + xs**2) / (2 * sigma**2))
+    # Radius of the Gaussian kernel (cover 3σ in each direction)
+    kernel_radius = int(np.ceil(3 * sigma))
 
-    for k in range(len(planner_scores)):
-        w = planner_scores[k]
-        for t in range(TRAJ_WAYPOINTS):
-            cr, cc = coords[k, t]
-            ri, ci = int(round(cr)), int(round(cc))
-            # Splat Gaussian
-            r0, r1 = ri - r, ri + r + 1
-            c0, c1 = ci - r, ci + r + 1
-            # Clip to grid
-            kr0 = max(0, -r0); kr1 = kr0 + min(r1, GRID_H) - max(r0, 0)
-            kc0 = max(0, -c0); kc1 = kc0 + min(c1, GRID_W) - max(c0, 0)
-            gr0 = max(r0, 0); gr1 = min(r1, GRID_H)
-            gc0 = max(c0, 0); gc1 = min(c1, GRID_W)
-            if gr1 > gr0 and gc1 > gc0:
-                grid[gr0:gr1, gc0:gc1] += w * kernel[kr0:kr1, kc0:kc1]
+    # Precompute a 2D Gaussian kernel centred at (0,0)
+    kernel_offsets_y, kernel_offsets_x = np.mgrid[
+        -kernel_radius : kernel_radius + 1,
+        -kernel_radius : kernel_radius + 1,
+    ]
+    gaussian_kernel = np.exp(
+        -(kernel_offsets_y**2 + kernel_offsets_x**2) / (2 * sigma**2)
+    )
 
-    total = grid.sum()
-    if total > 1e-12:
-        grid /= total
-    return grid
+    for traj_idx, trajectory_weight in enumerate(planner_scores):
+        for waypoint_idx in range(TRAJ_WAYPOINTS):
+            # Continuous coordinates of the waypoint on the BEV grid
+            row_center, col_center = waypoint_coords[traj_idx, waypoint_idx]
+
+            # Nearest pixel for placing the kernel centre
+            row_pixel = int(round(row_center))
+            col_pixel = int(round(col_center))
+
+            # Full (unbounded) row and column spans that the kernel would cover
+            row_start_full = row_pixel - kernel_radius
+            row_end_full   = row_pixel + kernel_radius + 1
+            col_start_full = col_pixel - kernel_radius
+            col_end_full   = col_pixel + kernel_radius + 1
+
+            # --- Clipping: compute valid slices in the grid ---
+            # Grid row slice (exclusive upper bound)
+            grid_row_start = max(row_start_full, 0)
+            grid_row_end   = min(row_end_full, GRID_H)
+
+            # Grid column slice
+            grid_col_start = max(col_start_full, 0)
+            grid_col_end   = min(col_end_full, GRID_W)
+
+            # --- Corresponding slices inside the kernel array ---
+            # Row start in the kernel: skip rows that fall above the grid
+            kernel_row_start = max(0, -row_start_full)
+            # Row end in the kernel: start + number of valid rows
+            kernel_row_end = kernel_row_start + (grid_row_end - grid_row_start)
+
+            kernel_col_start = max(0, -col_start_full)
+            kernel_col_end   = kernel_col_start + (grid_col_end - grid_col_start)
+
+            # Only add if there is an actual overlap (non-empty slice)
+            if grid_row_end > grid_row_start and grid_col_end > grid_col_start:
+                probability_grid[
+                    grid_row_start:grid_row_end,
+                    grid_col_start:grid_col_end,
+                ] += (
+                    trajectory_weight
+                    * gaussian_kernel[
+                        kernel_row_start:kernel_row_end,
+                        kernel_col_start:kernel_col_end,
+                    ]
+                )
+
+    # Normalise to a valid probability distribution
+    total_mass = probability_grid.sum()
+    if total_mass > 1e-12:
+        probability_grid /= total_mass
+    return probability_grid
 
 
 def js_divergence(p, q, eps=1e-10):
@@ -85,14 +128,30 @@ def js_divergence(p, q, eps=1e-10):
     """
     p = p.ravel().astype(np.float64)
     q = q.ravel().astype(np.float64)
-    p = p / (p.sum() + eps)
-    q = q / (q.sum() + eps)
+
+    p_sum = p.sum()
+    q_sum = q.sum()
+
+    if p_sum < eps or q_sum < eps:
+        # One or both distributions are essentially empty
+        return np.nan
+    
+    p = p / p_sum
+    q = q / q_sum
     m = 0.5 * (p + q)
-    # KL(p||m) + KL(q||m), using only non-zero entries
-    mask = (p > eps) | (q > eps)
-    kl_pm = np.sum(p[mask] * np.log((p[mask] + eps) / (m[mask] + eps)))
-    kl_qm = np.sum(q[mask] * np.log((q[mask] + eps) / (m[mask] + eps)))
-    return 0.5 * (kl_pm + kl_qm)
+
+    mask_p = p > eps
+    mask_q = q > eps
+    
+    # KL(p||m): only sum where p > 0
+    # m[i] >= 0.5*p[i] > 0 wherever p[i] > 0, so m[mask_p] > 0 guaranteed
+    kl_pm = np.sum(p[mask_p] * np.log(p[mask_p] / m[mask_p]))
+    
+    # KL(q||m): only sum where q > 0
+    kl_qm = np.sum(q[mask_q] * np.log(q[mask_q] / m[mask_q]))
+    
+    jsd = 0.5 * (kl_pm + kl_qm)
+    return np.clip(jsd, 0.0, np.log(2.0))
 
 
 def planner_spread_entropy(planner_trajs, planner_scores):
@@ -120,7 +179,7 @@ def _align_occupancy_to_planner_bev(occ):
 
     Planner BEV (from _traj_to_bev_coords):
         axis-0 (row) = forward inverted  (row=0 is far forward, row=H is behind ego)
-        axis-1 (col) = left  (col=0 is far left, col=W is far right)
+        axis-1 (col) = left  (col=0 is far right, col=W is far left) - confusing! - higher axis-1 values are more left
 
     Transformation:
         PlannerRow = (GRID_RANGE - forward) / resolution
@@ -141,7 +200,7 @@ def _align_occupancy_to_planner_bev(occ):
 
 
 
-def check_coordinate_alignment(planner_trajs, planner_scores, occ_grid, ego_forward_m=10.0):
+def check_coordinate_alignment(planner_trajs, planner_scores, ego_forward_m=10.0):
     """
     Sanity check: place a synthetic obstacle directly ahead and verify that
     the planner grid and aligned occupancy grid both peak in the same region.
@@ -156,8 +215,8 @@ def check_coordinate_alignment(planner_trajs, planner_scores, occ_grid, ego_forw
     # Guardian: row = forward/res + origin → row for ego_forward_m ahead
     res = GRID_RANGE * 2 / GRID_H  # same as CELL_SIZE
     origin = GRID_H // 2
-    ahead_row = int(ego_forward_m / res + origin)
-    ahead_col = origin  # right=0 → center column
+    ahead_col = int(ego_forward_m / res + origin)
+    ahead_row = origin  # right=0 → center column
 
     synthetic_occ = np.zeros((GRID_H, GRID_W), dtype=np.float32)
     r0, r1 = max(0, ahead_row - 3), min(GRID_H, ahead_row + 4)

@@ -81,6 +81,17 @@ class Guardian:
         self._ego_bbox_rotation = carla.Rotation()
         
         self.log_data = []
+        self.latest_occ_grid = self._cached_occ_grid
+        self.latest_occ_meta = self._cached_occ_meta
+        self.latest_min_dist = np.nan
+        self.latest_min_dist_valid = False
+        self.latest_ttc = np.nan
+        self.latest_ttc_valid = False
+        self.latest_ttc_rel = np.nan
+        self.latest_ttc_rel_valid = False
+        self.latest_ttc_rel_distance = np.nan
+        self.latest_ttc_rel_closing_speed = np.nan
+        self.latest_ttc_rel_actor_type = 'none'
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         self.log_path = os.path.join(log_dir, f'guardian_{timestamp}.csv')
@@ -90,7 +101,9 @@ class Guardian:
             writer = csv.writer(f)
             writer.writerow([
                 'step', 'timestamp', 'ego_x', 'ego_y', 'ego_yaw', 'ego_speed',
-                'overlap_ratio', 'min_occupied_distance', 'ttc_occupied',
+                'overlap_ratio', 'min_occupied_distance', 'min_occupied_distance_valid',
+                'ttc_occupied', 'ttc_occupied_valid', 'ttc_rel', 'ttc_rel_valid',
+                'ttc_rel_distance', 'ttc_rel_closing_speed', 'ttc_rel_actor_type',
                 'req_decel', 'gc_score', 'gc_overlap_term', 'gc_potential_term',
                 'gc_decel_term', 'gc_ttc_term', 'cri_score', 'risk_direction',
                 'path_blocked', 'path_blockage_area', 'blocker_distance',
@@ -565,6 +578,107 @@ class Guardian:
             'blocker_direction': blocker_direction,
             'blocker_distance': min_distance
         }
+
+    def _compute_actor_relative_ttc(self, ego_transform, ego_speed, max_dist=75.0):
+        """
+        Estimate minimum actor-relative TTC from CARLA actor positions/velocities.
+
+        This is a transparent research baseline, not a formal RSS/NCAP
+        implementation. It uses line-of-sight closing speed and approximate
+        bounding-circle clearance.
+        """
+        result = {
+            'ttc': np.inf,
+            'valid': True,
+            'distance': np.inf,
+            'closing_speed': 0.0,
+            'actor_type': 'none',
+            'actor_id': -1,
+        }
+
+        if self.world is None:
+            result.update({
+                'ttc': np.nan,
+                'valid': False,
+                'distance': np.nan,
+                'closing_speed': np.nan,
+            })
+            return result
+
+        speed_value = float(np.asarray(ego_speed).reshape(-1)[0])
+        if not np.isfinite(speed_value):
+            result.update({
+                'ttc': np.nan,
+                'valid': False,
+                'distance': np.nan,
+                'closing_speed': np.nan,
+            })
+            return result
+
+        ego_radius = math.hypot(self.vehicle_length / 2.0, self.vehicle_width / 2.0)
+
+        try:
+            actors = self._actor_list_cache if self._actor_list_cache is not None else list(self.world.get_actors())
+        except Exception:
+            result.update({
+                'ttc': np.nan,
+                'valid': False,
+                'distance': np.nan,
+                'closing_speed': np.nan,
+            })
+            return result
+
+        best_ttc = np.inf
+        for actor in actors:
+            try:
+                if hasattr(actor, 'attributes') and actor.attributes.get('role_name') == 'hero':
+                    continue
+
+                type_id = actor.type_id
+                if not (type_id.startswith(('vehicle.', 'walker.')) or 'static.prop' in type_id):
+                    continue
+
+                transform = actor.get_transform()
+                bbox_center = self._transform_location(transform, actor.bounding_box.location)
+                local = self._world_to_ego_local_points(
+                    np.array([[bbox_center.x, bbox_center.y, bbox_center.z]], dtype=np.float64),
+                    ego_transform
+                )[0]
+
+                forward, right = float(local[0]), float(local[1])
+                dist = math.hypot(forward, right)
+                if dist < 1e-3 or dist > max_dist or local[2] < -2.5 or local[2] > 5.0:
+                    continue
+
+                if type_id.startswith(('vehicle.', 'walker.')):
+                    actor_vel = self._velocity_to_ego_local(actor.get_velocity(), ego_transform)
+                else:
+                    actor_vel = np.zeros(2, dtype=np.float64)
+
+                rel_vel = actor_vel - np.array([speed_value, 0.0], dtype=np.float64)
+                unit = np.array([forward, right], dtype=np.float64) / dist
+                closing_speed = max(0.0, -float(np.dot(rel_vel, unit)))
+                if closing_speed <= 0.1:
+                    continue
+
+                extent = actor.bounding_box.extent
+                actor_radius = math.hypot(float(extent.x), float(extent.y))
+                clearance = max(dist - ego_radius - actor_radius, 0.0)
+                ttc = clearance / closing_speed
+
+                if ttc < best_ttc:
+                    best_ttc = ttc
+                    result.update({
+                        'ttc': float(ttc),
+                        'distance': float(clearance),
+                        'closing_speed': float(closing_speed),
+                        'actor_type': type_id,
+                        'actor_id': int(getattr(actor, 'id', -1)),
+                    })
+            except Exception:
+                continue
+
+        return result
     
     def evaluate(self, traj, ego_transform, speed, ego_actor=None):
         """Lightweight evaluation for research logging."""
@@ -615,6 +729,11 @@ class Guardian:
             ttc = min_dist / max(speed_value, 0.1)
         else:
             ttc = 99.0
+
+        actor_ttc = self._compute_actor_relative_ttc(ego_transform, speed_value)
+        proxy_source_valid = occ_meta.get('source') not in ('error', 'none', 'init')
+        min_dist_valid = bool(proxy_source_valid and np.isfinite(min_dist) and min_dist >= 0.0)
+        ttc_valid = bool(proxy_source_valid and np.isfinite(ttc) and ttc >= 0.0)
         
         # ----- 5. Skip expensive CRI and path blockage -----
         if self.skip_cri:
@@ -659,7 +778,14 @@ class Guardian:
             'ego_speed': speed_value,
             'overlap_ratio': overlap_ratio,
             'min_occupied_distance': min_dist,
-            'ttc_occupied': ttc,                     # store real TTC
+            'min_occupied_distance_valid': min_dist_valid,
+            'ttc_occupied': ttc,
+            'ttc_occupied_valid': ttc_valid,
+            'ttc_rel': actor_ttc['ttc'],
+            'ttc_rel_valid': actor_ttc['valid'],
+            'ttc_rel_distance': actor_ttc['distance'],
+            'ttc_rel_closing_speed': actor_ttc['closing_speed'],
+            'ttc_rel_actor_type': actor_ttc['actor_type'],
             'req_decel': req_decel,
             'gc_score': Gc,
             **gc_terms,
@@ -679,7 +805,14 @@ class Guardian:
         self.latest_occ_grid = occ_grid
         self.latest_occ_meta = occ_meta
         self.latest_min_dist = min_dist
+        self.latest_min_dist_valid = min_dist_valid
         self.latest_ttc = ttc
+        self.latest_ttc_valid = ttc_valid
+        self.latest_ttc_rel = actor_ttc['ttc']
+        self.latest_ttc_rel_valid = actor_ttc['valid']
+        self.latest_ttc_rel_distance = actor_ttc['distance']
+        self.latest_ttc_rel_closing_speed = actor_ttc['closing_speed']
+        self.latest_ttc_rel_actor_type = actor_ttc['actor_type']
 
         return False, 0.0   # never intervene
     
@@ -792,7 +925,14 @@ class Guardian:
                 round(entry['ego_yaw'], 4), round(entry['ego_speed'], 2),
                 round(entry['overlap_ratio'], 4),
                 round(entry['min_occupied_distance'], 2),
+                int(entry['min_occupied_distance_valid']),
                 round(entry['ttc_occupied'], 2),
+                int(entry['ttc_occupied_valid']),
+                round(entry['ttc_rel'], 2),
+                int(entry['ttc_rel_valid']),
+                round(entry['ttc_rel_distance'], 2),
+                round(entry['ttc_rel_closing_speed'], 2),
+                entry['ttc_rel_actor_type'],
                 round(entry['req_decel'], 4),
                 round(entry['gc_score'], 4),
                 round(entry['gc_overlap_term'], 4),

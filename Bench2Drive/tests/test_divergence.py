@@ -9,14 +9,18 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add project root to path
+# Add tests directory and project root to path
+sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from analysis.divergence import (
+from divergence import (
     _traj_to_bev_coords,
     rasterize_planner,
+    rasterize_planner_temporal,
     js_divergence,
+    js_conflict_score,
     planner_spread_entropy,
+    build_future_occupancy_windows,
     compute_divergence_series,
     _align_occupancy_to_planner_bev,
     check_coordinate_alignment,
@@ -140,13 +144,70 @@ def test_compute_divergence_series():
     
     print(f"  Processed {len(timesteps)} timesteps")
     print(f"  Divergence shape: {result['divergence_raw'].shape}")
-    print(f"  Min divergence: {result['divergence_raw'].min():.6f}")
-    print(f"  Max divergence: {result['divergence_raw'].max():.6f}")
+    print(f"  Min divergence: {np.nanmin(result['divergence_raw']):.6f}")
+    print(f"  Max divergence: {np.nanmax(result['divergence_raw']):.6f}")
     print(f"  Steps with occupancy: {result['has_occupancy'].sum()}/{N}")
     
     assert len(result['divergence_raw']) == N
     assert len(result['divergence_smooth']) == N
-    assert not np.any(np.isnan(result['divergence_raw']))
+    assert not np.any(np.isnan(result['divergence_raw'][result['has_occupancy']]))
+    assert np.any(np.isnan(result['divergence_raw'][~result['has_occupancy']]))
+    assert 'temporal_conflict_raw' in result
+    assert 'temporal_js_raw' in result
+    print("  ✓ PASS")
+
+
+def test_future_occupancy_windows():
+    print("\n[TEST] Future occupancy windows → aligned offsets")
+    timesteps = []
+    for i in range(8):
+        occ = np.zeros((GRID_H, GRID_W), dtype=np.float32)
+        occ[GRID_H // 2, min(GRID_W - 1, GRID_W // 2 + i)] = 1.0
+        timesteps.append({
+            'planner_trajs': np.zeros((1, 2, 2), dtype=np.float32),
+            'planner_scores': np.ones(1, dtype=np.float32),
+            'occupancy_grid': occ,
+        })
+
+    windows, valid, offsets = build_future_occupancy_windows(
+        timesteps,
+        num_waypoints=2,
+        horizon_frames=4,
+    )
+
+    print(f"  windows shape: {windows.shape}, offsets={offsets.tolist()}")
+    assert windows.shape == (8, 2, GRID_H, GRID_W)
+    assert offsets.tolist() == [2, 4]
+    assert valid[0].tolist() == [True, True]
+    assert valid[-1].tolist() == [False, False]
+    assert windows[0, 0, GRID_H // 2, GRID_W // 2 + 2] == 1.0
+    print("  ✓ PASS")
+
+
+def test_temporal_conflict_uses_future_slice():
+    print("\n[TEST] Temporal conflict uses matched future occupancy")
+    planner_trajs = np.array([[[0.0, 5.0], [0.0, 10.0]]], dtype=np.float32)
+    planner_scores = np.ones(1, dtype=np.float32)
+    planner_future = rasterize_planner_temporal(planner_trajs, planner_scores)
+
+    occ_future = np.zeros((2, GRID_H, GRID_W), dtype=np.float32)
+    for h in range(2):
+        # Convert planner-aligned future distribution back into Guardian frame
+        # for storage. The alignment transform is its own inverse.
+        occ_future[h] = _align_occupancy_to_planner_bev(planner_future[h]).astype(np.float32)
+
+    result = compute_divergence_series([{
+        'planner_trajs': planner_trajs,
+        'planner_scores': planner_scores,
+        'occupancy_grid': np.zeros((GRID_H, GRID_W), dtype=np.float32),
+        'occupancy_future': occ_future,
+        'occupancy_future_valid': np.array([True, True]),
+    }])
+
+    print(f"  temporal conflict: {result['temporal_conflict_raw'][0]:.4f}")
+    assert result['temporal_valid_count'][0] == 2
+    assert result['temporal_conflict_raw'][0] > 0.95
+    assert np.isfinite(result['temporal_js_raw'][0])
     print("  ✓ PASS")
 
 
@@ -208,6 +269,8 @@ def main():
         test_rasterize_normalization,
         test_planner_spread_entropy,
         test_compute_divergence_series,
+        test_future_occupancy_windows,
+        test_temporal_conflict_uses_future_slice,
         test_grid_bounds,
         test_coordinate_alignment,
     ]

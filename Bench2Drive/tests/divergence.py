@@ -1,12 +1,11 @@
 """
-Divergence computation for planner-world temporal mismatch analysis.
+Temporal planner-world conflict measurement.
 
-D(t) = JS divergence between:
-  - Pπ: planner trajectory distribution rasterized to BEV grid
-  - Pw: world occupancy grid (normalized to probability)
-
-For routes with no occupancy (all-zero grid), falls back to
-planner_spread_entropy (weighted variance of trajectory endpoints).
+The publication-facing predictive signal is temporal_conflict_score:
+weighted planner occupancy over the future horizon compared against matched
+future world occupancy slices. Raw Jensen-Shannon divergence is also returned
+for auditability, but collision risk is expected to rise when planner futures
+overlap world occupancy futures, i.e. when JS divergence is low.
 """
 
 import numpy as np
@@ -20,6 +19,7 @@ CELL_SIZE = GRID_RANGE * 2 / GRID_H  # 0.5 m/cell
 
 # Trajectory
 TRAJ_WAYPOINTS = 6   # T waypoints per trajectory
+JS_MAX = np.log(2.0)
 
 
 def _traj_to_bev_coords(trajs):
@@ -40,6 +40,60 @@ def _traj_to_bev_coords(trajs):
     return coords
 
 
+def _normalise_scores(planner_scores):
+    scores = np.asarray(planner_scores, dtype=np.float64).reshape(-1)
+    total = scores.sum()
+    if total > 1e-12:
+        return scores / total
+    return np.ones_like(scores, dtype=np.float64) / max(len(scores), 1)
+
+
+def _add_gaussian(probability_grid, row_center, col_center, weight, sigma):
+    kernel_radius = int(np.ceil(3 * sigma))
+    kernel_offsets_y, kernel_offsets_x = np.mgrid[
+        -kernel_radius : kernel_radius + 1,
+        -kernel_radius : kernel_radius + 1,
+    ]
+    gaussian_kernel = np.exp(
+        -(kernel_offsets_y**2 + kernel_offsets_x**2) / (2 * sigma**2)
+    )
+
+    row_pixel = int(round(row_center))
+    col_pixel = int(round(col_center))
+
+    row_start_full = row_pixel - kernel_radius
+    row_end_full = row_pixel + kernel_radius + 1
+    col_start_full = col_pixel - kernel_radius
+    col_end_full = col_pixel + kernel_radius + 1
+
+    grid_row_start = max(row_start_full, 0)
+    grid_row_end = min(row_end_full, GRID_H)
+    grid_col_start = max(col_start_full, 0)
+    grid_col_end = min(col_end_full, GRID_W)
+
+    kernel_row_start = max(0, -row_start_full)
+    kernel_row_end = kernel_row_start + (grid_row_end - grid_row_start)
+    kernel_col_start = max(0, -col_start_full)
+    kernel_col_end = kernel_col_start + (grid_col_end - grid_col_start)
+
+    if grid_row_end > grid_row_start and grid_col_end > grid_col_start:
+        probability_grid[
+            grid_row_start:grid_row_end,
+            grid_col_start:grid_col_end,
+        ] += weight * gaussian_kernel[
+            kernel_row_start:kernel_row_end,
+            kernel_col_start:kernel_col_end,
+        ]
+
+
+def _normalise_grid(grid):
+    grid = np.asarray(grid, dtype=np.float64)
+    total = grid.sum()
+    if total > 1e-12:
+        return grid / total
+    return grid
+
+
 def rasterize_planner(planner_trajs, planner_scores, sigma=3.0):
     """
     Rasterize weighted planner trajectories onto a BEV probability grid.
@@ -52,72 +106,49 @@ def rasterize_planner(planner_trajs, planner_scores, sigma=3.0):
     Returns:
         probability_grid: (H, W) normalised probability grid, sums to 1.
     """
+    planner_trajs = np.asarray(planner_trajs, dtype=np.float64)
+    if planner_trajs.ndim == 2:
+        planner_trajs = planner_trajs[None, ...]
+    planner_scores = _normalise_scores(planner_scores)
+
     probability_grid = np.zeros((GRID_H, GRID_W), dtype=np.float64)
     waypoint_coords = _traj_to_bev_coords(planner_trajs)  # (K, T, 2)
-
-    # Radius of the Gaussian kernel (cover 3σ in each direction)
-    kernel_radius = int(np.ceil(3 * sigma))
-
-    # Precompute a 2D Gaussian kernel centred at (0,0)
-    kernel_offsets_y, kernel_offsets_x = np.mgrid[
-        -kernel_radius : kernel_radius + 1,
-        -kernel_radius : kernel_radius + 1,
-    ]
-    gaussian_kernel = np.exp(
-        -(kernel_offsets_y**2 + kernel_offsets_x**2) / (2 * sigma**2)
-    )
+    num_waypoints = waypoint_coords.shape[1]
 
     for traj_idx, trajectory_weight in enumerate(planner_scores):
-        for waypoint_idx in range(TRAJ_WAYPOINTS):
-            # Continuous coordinates of the waypoint on the BEV grid
+        for waypoint_idx in range(num_waypoints):
             row_center, col_center = waypoint_coords[traj_idx, waypoint_idx]
-
-            # Nearest pixel for placing the kernel centre
-            row_pixel = int(round(row_center))
-            col_pixel = int(round(col_center))
-
-            # Full (unbounded) row and column spans that the kernel would cover
-            row_start_full = row_pixel - kernel_radius
-            row_end_full   = row_pixel + kernel_radius + 1
-            col_start_full = col_pixel - kernel_radius
-            col_end_full   = col_pixel + kernel_radius + 1
-
-            # --- Clipping: compute valid slices in the grid ---
-            # Grid row slice (exclusive upper bound)
-            grid_row_start = max(row_start_full, 0)
-            grid_row_end   = min(row_end_full, GRID_H)
-
-            # Grid column slice
-            grid_col_start = max(col_start_full, 0)
-            grid_col_end   = min(col_end_full, GRID_W)
-
-            # --- Corresponding slices inside the kernel array ---
-            # Row start in the kernel: skip rows that fall above the grid
-            kernel_row_start = max(0, -row_start_full)
-            # Row end in the kernel: start + number of valid rows
-            kernel_row_end = kernel_row_start + (grid_row_end - grid_row_start)
-
-            kernel_col_start = max(0, -col_start_full)
-            kernel_col_end   = kernel_col_start + (grid_col_end - grid_col_start)
-
-            # Only add if there is an actual overlap (non-empty slice)
-            if grid_row_end > grid_row_start and grid_col_end > grid_col_start:
-                probability_grid[
-                    grid_row_start:grid_row_end,
-                    grid_col_start:grid_col_end,
-                ] += (
-                    trajectory_weight
-                    * gaussian_kernel[
-                        kernel_row_start:kernel_row_end,
-                        kernel_col_start:kernel_col_end,
-                    ]
-                )
+            _add_gaussian(probability_grid, row_center, col_center, trajectory_weight, sigma)
 
     # Normalise to a valid probability distribution
-    total_mass = probability_grid.sum()
-    if total_mass > 1e-12:
-        probability_grid /= total_mass
-    return probability_grid
+    return _normalise_grid(probability_grid)
+
+
+def rasterize_planner_temporal(planner_trajs, planner_scores, sigma=3.0):
+    """
+    Rasterize each planner waypoint timestep separately.
+
+    Returns:
+        probability_grids: (T, H, W), one normalized BEV distribution per
+        future waypoint.
+    """
+    planner_trajs = np.asarray(planner_trajs, dtype=np.float64)
+    if planner_trajs.ndim == 2:
+        planner_trajs = planner_trajs[None, ...]
+    planner_scores = _normalise_scores(planner_scores)
+
+    waypoint_coords = _traj_to_bev_coords(planner_trajs)
+    num_waypoints = waypoint_coords.shape[1]
+    probability_grids = np.zeros((num_waypoints, GRID_H, GRID_W), dtype=np.float64)
+
+    for waypoint_idx in range(num_waypoints):
+        grid = probability_grids[waypoint_idx]
+        for traj_idx, trajectory_weight in enumerate(planner_scores):
+            row_center, col_center = waypoint_coords[traj_idx, waypoint_idx]
+            _add_gaussian(grid, row_center, col_center, trajectory_weight, sigma)
+        probability_grids[waypoint_idx] = _normalise_grid(grid)
+
+    return probability_grids
 
 
 def js_divergence(p, q, eps=1e-10):
@@ -133,8 +164,8 @@ def js_divergence(p, q, eps=1e-10):
     q_sum = q.sum()
 
     if p_sum < eps or q_sum < eps:
-        # One or both distributions are essentially empty
-        return np.nan
+        # If one is empty, they are maximally different (disjoint)
+        return np.log(2.0)
     
     p = p / p_sum
     q = q / q_sum
@@ -143,25 +174,32 @@ def js_divergence(p, q, eps=1e-10):
     mask_p = p > eps
     mask_q = q > eps
     
-    # KL(p||m): only sum where p > 0
-    # m[i] >= 0.5*p[i] > 0 wherever p[i] > 0, so m[mask_p] > 0 guaranteed
     kl_pm = np.sum(p[mask_p] * np.log(p[mask_p] / m[mask_p]))
-    
-    # KL(q||m): only sum where q > 0
     kl_qm = np.sum(q[mask_q] * np.log(q[mask_q] / m[mask_q]))
     
     jsd = 0.5 * (kl_pm + kl_qm)
-    return np.clip(jsd, 0.0, np.log(2.0))
+    return np.clip(jsd, 0.0, JS_MAX)
+
+
+def js_conflict_score(js_value):
+    """
+    Convert JS divergence into an overlap/conflict score in [0, 1].
+
+    High values mean planner probability mass and world occupancy mass are
+    spatially aligned at the matched future slice.
+    """
+    if not np.isfinite(js_value):
+        return np.nan
+    return float(np.clip(1.0 - js_value / JS_MAX, 0.0, 1.0))
 
 
 def planner_spread_entropy(planner_trajs, planner_scores):
     """
     Fallback divergence signal when occupancy is unavailable.
-    Measures weighted variance of trajectory endpoints (spread of planner distribution).
-    Higher = more uncertain/spread planner = higher divergence signal.
-
-    Returns scalar >= 0.
+    Measures weighted variance of trajectory endpoints.
     """
+    if np.sum(planner_scores) < 1e-12:
+        return 0.0
     endpoints = planner_trajs[:, -1, :]  # (K, 2)
     mean = np.average(endpoints, weights=planner_scores, axis=0)
     diffs = endpoints - mean  # (K, 2)
@@ -169,59 +207,67 @@ def planner_spread_entropy(planner_trajs, planner_scores):
     return float(weighted_var)
 
 
+def build_future_occupancy_windows(timesteps, num_waypoints=None, horizon_frames=None):
+    """
+    Offline helper for logs that do not already contain occupancy_future.
+
+    Returns an array with shape (N, T, H, W), where T matches planner waypoint
+    count. The last frames whose future window extends past the route end are
+    zero-filled and marked invalid in the returned validity mask.
+    """
+    if not timesteps:
+        return (
+            np.zeros((0, 0, GRID_H, GRID_W), dtype=np.float16),
+            np.zeros((0, 0), dtype=bool),
+            np.array([], dtype=np.int64),
+        )
+
+    if num_waypoints is None:
+        first_trajs = next((t.get('planner_trajs') for t in timesteps if 'planner_trajs' in t), None)
+        num_waypoints = int(np.asarray(first_trajs).shape[1]) if first_trajs is not None else TRAJ_WAYPOINTS
+    if horizon_frames is None:
+        horizon_frames = num_waypoints
+
+    offsets = np.rint(
+        np.linspace(horizon_frames / num_waypoints, horizon_frames, num_waypoints)
+    ).astype(np.int64)
+    occupancy_grids = [np.asarray(t['occupancy_grid'], dtype=np.float16) for t in timesteps]
+    windows = np.zeros((len(timesteps), num_waypoints, GRID_H, GRID_W), dtype=np.float16)
+    valid = np.zeros((len(timesteps), num_waypoints), dtype=bool)
+
+    for i in range(len(timesteps)):
+        for h, offset in enumerate(offsets):
+            j = i + int(offset)
+            if j < len(timesteps):
+                windows[i, h] = occupancy_grids[j]
+                valid[i, h] = True
+
+    return windows, valid, offsets
+
+
 def _align_occupancy_to_planner_bev(occ):
     """
-    Align Guardian occupancy grid to planner BEV convention.
-
-    Guardian grid (from guardian._local_to_grid):
-        axis-0 (row) = right  (row increases with right distance)
-        axis-1 (col) = forward (col increases with forward distance)
-
-    Planner BEV (from _traj_to_bev_coords):
-        axis-0 (row) = forward inverted  (row=0 is far forward, row=H is behind ego)
-        axis-1 (col) = left  (col=0 is far right, col=W is far left) - confusing! - higher axis-1 values are more left
-
-    Transformation:
-        PlannerRow = (GRID_RANGE - forward) / resolution
-        PlannerCol = (left + GRID_RANGE) / resolution
-
-        Since Guardian:
-        OldCol = forward / resolution + origin
-        OldRow = right / resolution + origin
-        And left = -right
-
-        We have:
-        PlannerRow = 120 - OldCol
-        PlannerCol = 120 - OldRow
-
-        Implementation: Transpose then flip both axes (equivalent to 180 deg rot of transpose).
+    Align Guardian occupancy grid (row=right, col=forward) 
+    to planner BEV (row=ahead_inverted, col=left).
+    Transformation: Transpose then flip both axes.
     """
     return occ.T[::-1, ::-1]
-
 
 
 def check_coordinate_alignment(planner_trajs, planner_scores, ego_forward_m=10.0):
     """
     Sanity check: place a synthetic obstacle directly ahead and verify that
     the planner grid and aligned occupancy grid both peak in the same region.
-
-    Returns a dict with:
-        planner_peak_row, planner_peak_col  - where planner mass concentrates
-        occ_peak_row, occ_peak_col          - where occupancy mass concentrates
-        row_diff, col_diff                  - pixel offset between peaks
-        aligned                             - True if peaks are within 10px of each other
     """
-    # Synthetic occupancy: blob directly ahead at ego_forward_m in Guardian convention
-    # Guardian: row = forward/res + origin → row for ego_forward_m ahead
-    res = GRID_RANGE * 2 / GRID_H  # same as CELL_SIZE
+    res = GRID_RANGE * 2 / GRID_H 
     origin = GRID_H // 2
+    
+    # Guardian Frame: row=right, col=forward
     ahead_col = int(ego_forward_m / res + origin)
-    ahead_row = origin  # right=0 → center column
+    ahead_row = origin
 
     synthetic_occ = np.zeros((GRID_H, GRID_W), dtype=np.float32)
-    r0, r1 = max(0, ahead_row - 3), min(GRID_H, ahead_row + 4)
-    c0, c1 = max(0, ahead_col - 3), min(GRID_W, ahead_col + 4)
-    synthetic_occ[r0:r1, c0:c1] = 1.0
+    synthetic_occ[ahead_row, ahead_col] = 1.0
 
     # Align to planner BEV
     occ_aligned = _align_occupancy_to_planner_bev(synthetic_occ)
@@ -231,76 +277,103 @@ def check_coordinate_alignment(planner_trajs, planner_scores, ego_forward_m=10.0
     p_grid = rasterize_planner(planner_trajs, planner_scores)
     planner_peak = np.unravel_index(p_grid.argmax(), p_grid.shape)
 
-    row_diff = abs(int(occ_peak[0]) - int(planner_peak[0]))
-    col_diff = abs(int(occ_peak[1]) - int(planner_peak[1]))
+    expected_row = int((GRID_RANGE - ego_forward_m) / res)  
+    expected_col = origin  
 
-    # For a vehicle going straight, both peaks should be near top-center of BEV
-    # (low row index = far forward, center col = straight ahead)
-    expected_row = int((GRID_RANGE - ego_forward_m) / res)  # planner convention
-    expected_col = origin  # left=0 → center
+    row_diff = abs(int(occ_peak[0]) - expected_row)
+    col_diff = abs(int(occ_peak[1]) - expected_col)
 
     return {
-        'planner_peak': planner_peak,
         'occ_peak_aligned': occ_peak,
-        'expected_row': expected_row,
-        'expected_col': expected_col,
+        'expected': (expected_row, expected_col),
         'row_diff': row_diff,
         'col_diff': col_diff,
-        'aligned': row_diff < 10 and col_diff < 10,
+        'aligned': row_diff <= 2 and col_diff <= 2,
     }
 
 
 def compute_divergence_series(timesteps, use_occupancy=True, temporal_window=5):
     """
-    Compute D(t) for all timesteps.
+    Compute temporal planner-world conflict and raw JS divergence for all steps.
 
-    use_occupancy: if True and occupancy is non-zero, use JS divergence.
-                   if False or occupancy is all-zero, use planner_spread_entropy.
-    temporal_window: smooth D(t) with a causal rolling mean of this width.
-
-    Returns dict with arrays of length N:
-        divergence_raw, divergence_smooth, planner_spread,
-        has_occupancy (bool per step)
+    The predictive score is temporal_conflict_raw/smooth. Raw JS divergence is
+    returned separately as temporal_js_raw/smooth.
     """
     N = len(timesteps)
-    divergence_raw = np.zeros(N)
+    temporal_conflict_raw = np.full(N, np.nan)
+    temporal_js_raw = np.full(N, np.nan)
+    temporal_valid_count = np.zeros(N, dtype=np.int64)
     planner_spread = np.zeros(N)
     has_occupancy = np.zeros(N, dtype=bool)
 
     for i, t in enumerate(timesteps):
-        trajs = t['planner_trajs']    # (K, T, 2)
-        scores = t['planner_scores']  # (K,)
-        occ = t['occupancy_grid']     # (H, W) in Guardian convention
+        trajs = t['planner_trajs']    
+        scores = t['planner_scores']  
+        occ_current = t['occupancy_grid']
 
         spread = planner_spread_entropy(trajs, scores)
         planner_spread[i] = spread
 
-        occ_has_signal = occ.max() > 1e-6
-        has_occupancy[i] = occ_has_signal
-
-        if use_occupancy and occ_has_signal:
-            p_grid = rasterize_planner(trajs, scores)
-            # Align occupancy to planner BEV convention before computing divergence
-            q_grid = _align_occupancy_to_planner_bev(occ).astype(np.float64)
-            q_grid = q_grid / (q_grid.sum() + 1e-10)
-            
-            # JS divergence is log(2) (~0.693) when disjoint (safe) and 0 when identical (overlap).
-            # We want a RISK signal that RISES before collision (high overlap).
-            js = js_divergence(p_grid, q_grid)
-            divergence_raw[i] = 0.7 - js
+        if 'occupancy_future' in t:
+            occupancy_future = np.asarray(t['occupancy_future'])
+            occupancy_valid = np.asarray(
+                t.get('occupancy_future_valid', np.ones(len(occupancy_future), dtype=bool)),
+                dtype=bool,
+            )
         else:
-            # No occupancy: use planner spread as proxy
-            divergence_raw[i] = spread
+            occupancy_future = np.asarray(occ_current)[None, ...]
+            occupancy_valid = np.array([True], dtype=bool)
 
-    # Causal rolling mean (no lookahead)
-    divergence_smooth = np.zeros(N)
+        occ_has_signal = np.array([occ.max() > 1e-6 for occ in occupancy_future], dtype=bool)
+        valid_slices = occupancy_valid & occ_has_signal
+        has_occupancy[i] = valid_slices.any()
+
+        if use_occupancy and valid_slices.any():
+            planner_future = rasterize_planner_temporal(trajs, scores)
+            num_slices = min(len(planner_future), len(occupancy_future))
+            js_values = []
+            conflict_values = []
+            for h in range(num_slices):
+                if not valid_slices[h]:
+                    continue
+                p_grid = planner_future[h]
+                q_grid = _align_occupancy_to_planner_bev(occupancy_future[h]).astype(np.float64)
+                q_grid = _normalise_grid(q_grid)
+
+                js = js_divergence(p_grid, q_grid)
+                js_values.append(js)
+                conflict_values.append(js_conflict_score(js))
+
+            temporal_valid_count[i] = len(js_values)
+            if js_values:
+                temporal_js_raw[i] = float(np.mean(js_values))
+                temporal_conflict_raw[i] = float(np.mean(conflict_values))
+
+    # Causal rolling mean
+    temporal_conflict_smooth = np.full(N, np.nan)
+    temporal_js_smooth = np.full(N, np.nan)
     for i in range(N):
+        if not np.isfinite(temporal_conflict_raw[i]):
+            continue
         start = max(0, i - temporal_window + 1)
-        divergence_smooth[i] = divergence_raw[start:i+1].mean()
+        conflict_window = temporal_conflict_raw[start:i+1]
+        conflict_valid = np.isfinite(conflict_window)
+        if conflict_valid.any():
+            temporal_conflict_smooth[i] = conflict_window[conflict_valid].mean()
+        js_window = temporal_js_raw[start:i+1]
+        js_valid = np.isfinite(js_window)
+        if js_valid.any():
+            temporal_js_smooth[i] = js_window[js_valid].mean()
 
     return {
-        'divergence_raw': divergence_raw,
-        'divergence_smooth': divergence_smooth,
+        'temporal_conflict_raw': temporal_conflict_raw,
+        'temporal_conflict_smooth': temporal_conflict_smooth,
+        'temporal_js_raw': temporal_js_raw,
+        'temporal_js_smooth': temporal_js_smooth,
+        'temporal_valid_count': temporal_valid_count,
+        # Backward-compatible aliases used by existing analysis code.
+        'divergence_raw': temporal_conflict_raw,
+        'divergence_smooth': temporal_conflict_smooth,
         'planner_spread': planner_spread,
         'has_occupancy': has_occupancy,
     }

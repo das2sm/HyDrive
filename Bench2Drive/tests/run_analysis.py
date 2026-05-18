@@ -1,10 +1,10 @@
 """
-Month 2 Divergence Analysis
+Month 2 Temporal Conflict Analysis
 ============================
 Tasks:
-  4. AUROC / AUPRC: divergence vs baselines for early failure prediction
-  5. Matched-bin separation: divergence within TTC/dist/speed bins
-  6. Lead-time analysis: divergence rise time vs TTC trigger time
+  4. AUROC / AUPRC: temporal conflict vs baselines for early failure prediction
+  5. Matched-bin separation: conflict within TTC/dist/speed bins
+  6. Lead-time analysis: conflict rise time vs TTC trigger time
   7. Ablation: remove multi-modal sampling, temporal aggregation
 
 Usage:
@@ -25,10 +25,50 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# Allow imports from project root
+# Allow imports from current directory (tests) and project root
+sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from analysis.divergence import compute_divergence_series, planner_spread_entropy, rasterize_planner, js_divergence
-from analysis.baselines import compute_baseline_series
+
+from divergence import (
+    compute_divergence_series,
+    planner_spread_entropy,
+    rasterize_planner,
+    rasterize_planner_temporal,
+    js_divergence,
+    js_conflict_score,
+    _align_occupancy_to_planner_bev,
+)
+from baselines import compute_baseline_series
+
+
+BASELINE_SCORE_KEYS = ['ttc_proxy_risk', 'ttc_rel_risk', 'dist_proxy_risk', 'rss_proxy']
+
+
+def available_keys(signals, keys):
+    return [k for k in keys if k in signals and np.isfinite(signals[k]).any()]
+
+
+def preferred_ttc_key(signals):
+    rel = signals.get('ttc_rel_risk')
+    if rel is not None and np.isfinite(rel).any():
+        return 'ttc_rel_risk'
+    return 'ttc_proxy_risk'
+
+
+def finite_percentile_edges(values, percentiles):
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(values)
+    if not finite.any():
+        return None
+    return np.unique(np.percentile(values[finite], percentiles))
+
+
+def finite_max(values):
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(values)
+    if not finite.any():
+        return np.nan
+    return float(np.max(values[finite]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,15 +76,29 @@ from analysis.baselines import compute_baseline_series
 # ─────────────────────────────────────────────────────────────────────────────
 
 def roc_auc(scores, labels):
-    if labels.sum() == 0 or labels.sum() == len(labels):
+    """Robust ROC AUC that handles NaNs and single-class edge cases."""
+    scores = np.asarray(scores)
+    labels = np.asarray(labels)
+    valid = ~np.isnan(scores)
+    if valid.sum() == 0:
         return float('nan')
-    return float(roc_auc_score(labels, scores))
+    s, l = scores[valid], labels[valid]
+    if l.sum() == 0 or l.sum() == len(l):
+        return float('nan')
+    return float(roc_auc_score(l, s))
 
 
 def pr_auc(scores, labels):
-    if labels.sum() == 0:
+    """Robust PR AUC that handles NaNs and edge cases."""
+    scores = np.asarray(scores)
+    labels = np.asarray(labels)
+    valid = ~np.isnan(scores)
+    if valid.sum() == 0:
         return float('nan')
-    return float(average_precision_score(labels, scores))
+    s, l = scores[valid], labels[valid]
+    if l.sum() == 0:
+        return float('nan')
+    return float(average_precision_score(l, s))
 
 
 def bootstrap_ci(scores, labels, metric_fn, n=500, alpha=0.05, rng=None):
@@ -99,7 +153,7 @@ def route_bootstrap_ci(per_route_scores, per_route_labels, metric_fn, n=500, alp
 
 def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_route_labels=None):
     """
-    Compare divergence vs baselines on early failure prediction.
+    Compare temporal conflict vs baselines on early failure prediction.
     Uses route-level bootstrap when per_route_signals is provided.
     """
     print("\n" + "="*60)
@@ -107,13 +161,13 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
     print("="*60)
 
     candidates = {
-        'divergence_smooth': signals['divergence_smooth'],
-        'divergence_raw':    signals['divergence_raw'],
-        'planner_spread':    signals['planner_spread'],
-        'ttc_inv':           signals['ttc_inv'],
-        'dist_inv':          signals['dist_inv'],
-        'rss':               signals['rss'],
+        'temporal_conflict_smooth': signals['temporal_conflict_smooth'],
+        'temporal_conflict_raw':    signals['temporal_conflict_raw'],
+        'planner_spread':           signals['planner_spread'],
     }
+    for name in available_keys(signals, BASELINE_SCORE_KEYS):
+        if name in signals:
+            candidates[name] = signals[name]
 
     results = {}
     for name, s in candidates.items():
@@ -142,9 +196,14 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
     auprc_errs = [[results[n]['auprc'] - results[n]['auprc_ci'][0] for n in names],
                   [results[n]['auprc_ci'][1] - results[n]['auprc'] for n in names]]
 
-    colors = ['#e74c3c' if 'divergence' in n else '#3498db' for n in names]
+    aurocs_plot = np.nan_to_num(np.array(aurocs, dtype=float), nan=0.0)
+    auprcs_plot = np.nan_to_num(np.array(auprcs, dtype=float), nan=0.0)
+    auroc_errs_plot = np.nan_to_num(np.array(auroc_errs, dtype=float), nan=0.0)
+    auprc_errs_plot = np.nan_to_num(np.array(auprc_errs, dtype=float), nan=0.0)
+
+    colors = ['#e74c3c' if 'conflict' in n else '#3498db' for n in names]
     ax = axes[0]
-    bars = ax.bar(names, aurocs, color=colors, yerr=auroc_errs, capsize=4)
+    bars = ax.bar(names, aurocs_plot, color=colors, yerr=auroc_errs_plot, capsize=4)
     ax.axhline(0.5, color='gray', linestyle='--', linewidth=0.8, label='random')
     ax.set_ylim(0, 1.05)
     ax.set_title('AUROC: Early Failure Prediction')
@@ -154,7 +213,7 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
 
     ax = axes[1]
     baseline_rate = labels.mean()
-    ax.bar(names, auprcs, color=colors, yerr=auprc_errs, capsize=4)
+    ax.bar(names, auprcs_plot, color=colors, yerr=auprc_errs_plot, capsize=4)
     ax.axhline(baseline_rate, color='gray', linestyle='--', linewidth=0.8,
                label=f'random ({baseline_rate:.2f})')
     ax.set_ylim(0, 1.05)
@@ -177,27 +236,33 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
 def task5_matched_bin(signals, labels, timesteps, out_dir):
     """
     Anti-TTC-collapse test: within each TTC/dist/speed bin,
-    does divergence still separate failure from safe?
+    does temporal conflict still separate failure from safe?
     """
     print("\n" + "="*60)
     print("TASK 5: MATCHED-BIN SEPARATION")
     print("="*60)
 
-    div = signals['divergence_smooth']
-    ttc_inv = signals['ttc_inv']
-    dist_inv = signals['dist_inv']
+    div = signals['temporal_conflict_smooth']
+    ttc_key = preferred_ttc_key(signals)
+    ttc_risk = signals[ttc_key]
+    dist_risk = signals['dist_proxy_risk']
     speed = signals['speed']
 
     # Define binning variables and their edges
     bin_configs = [
         ('speed',    speed,    np.array([0, 2, 5, 10, 30])),
-        ('dist_inv', dist_inv, np.percentile(dist_inv, [0, 25, 50, 75, 100])),
-        ('ttc_inv',  ttc_inv,  np.percentile(ttc_inv,  [0, 25, 50, 75, 100])),
+        ('dist_proxy_risk', dist_risk, finite_percentile_edges(dist_risk, [0, 25, 50, 75, 100])),
+        (ttc_key, ttc_risk, finite_percentile_edges(ttc_risk, [0, 25, 50, 75, 100])),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     for ax, (bin_name, bin_var, bin_edges) in zip(axes, bin_configs):
+        if bin_edges is None or len(bin_edges) < 2:
+            ax.set_title(f'{bin_name}: unavailable')
+            ax.axis('off')
+            print(f"  {bin_name}: unavailable (no finite values)")
+            continue
         bin_edges = np.unique(bin_edges)
         separations = []
         bin_labels = []
@@ -230,7 +295,7 @@ def task5_matched_bin(signals, labels, timesteps, out_dir):
         ax.axhline(0, color='black', linewidth=0.8)
         ax.set_xticks(range(len(bin_labels)))
         ax.set_xticklabels(bin_labels, rotation=30, fontsize=8)
-        ax.set_title(f'Divergence separation within {bin_name} bins')
+        ax.set_title(f'Conflict separation within {bin_name} bins')
         ax.set_ylabel('mean(div|fail) − mean(div|safe)')
 
     plt.tight_layout()
@@ -247,7 +312,7 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
                     div_threshold_pct=75, ttc_threshold=2.0, sustain=3):
     """
     For each failure event, measure:
-      - t_div: first time divergence exceeds threshold before failure
+      - t_div: first time temporal conflict exceeds threshold before failure
       - t_ttc: first time TTC < ttc_threshold before failure
     Lead time = time_to_failure - t_signal.
     """
@@ -255,12 +320,18 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
     print("TASK 6: LEAD-TIME ANALYSIS")
     print("="*60)
 
-    div = signals['divergence_smooth']
-    ttc_raw = signals['ttc_raw']
+    div = signals['temporal_conflict_smooth']
+    ttc_raw_key = 'ttc_rel_raw' if 'ttc_rel_risk' in signals and np.isfinite(signals['ttc_rel_risk']).any() else 'ttc_proxy_raw'
+    ttc_raw = signals[ttc_raw_key]
 
-    div_thresh = np.percentile(div, div_threshold_pct)
-    print(f"  Divergence threshold (p{div_threshold_pct}): {div_thresh:.4f}")
-    print(f"  TTC threshold: {ttc_threshold:.1f}s")
+    div_finite = div[np.isfinite(div)]
+    if len(div_finite) == 0:
+        print("  Temporal conflict unavailable; skipping lead-time analysis.")
+        return {'div_leads': [], 'ttc_leads': []}
+
+    div_thresh = np.percentile(div_finite, div_threshold_pct)
+    print(f"  Temporal conflict threshold (p{div_threshold_pct}): {div_thresh:.4f}")
+    print(f"  TTC threshold: {ttc_threshold:.1f}s ({ttc_raw_key})")
 
     # Find actual collision frames (collision=True), deduplicated to one per event
     collision_steps = []
@@ -280,34 +351,38 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
     for collision_step in collision_steps:
         search_start = max(0, collision_step - 120)  # look back up to 6s
 
-        # Divergence: first causal sustained activation (sustain frames all above threshold)
+        # Conflict: first causal sustained activation (sustain frames all above threshold)
         div_trigger = None
+        div_lead = None
         for j in range(search_start, collision_step - sustain + 1):
             if np.all(div[j:j+sustain] > div_thresh):
                 div_trigger = j
                 break
         if div_trigger is not None:
-            div_leads.append((collision_step - div_trigger) / fps)
+            div_lead = (collision_step - div_trigger) / fps
+            div_leads.append(div_lead)
 
         # TTC: first causal sustained activation
         ttc_trigger = None
+        ttc_lead = None
         for j in range(search_start, collision_step - sustain + 1):
             window = ttc_raw[j:j+sustain]
-            if np.all((window < ttc_threshold) & (window < 999.0)):
+            if np.all(np.isfinite(window) & (window < ttc_threshold)):
                 ttc_trigger = j
                 break
         if ttc_trigger is not None:
-            ttc_leads.append((collision_step - ttc_trigger) / fps)
+            ttc_lead = (collision_step - ttc_trigger) / fps
+            ttc_leads.append(ttc_lead)
 
-        div_str = f"{div_leads[-1]:.2f}s" if div_leads else "None"
-        ttc_str = f"{ttc_leads[-1]:.2f}s" if ttc_leads else "None"
+        div_str = f"{div_lead:.2f}s" if div_lead is not None else "None"
+        ttc_str = f"{ttc_lead:.2f}s" if ttc_lead is not None else "None"
         print(f"  Collision at step {collision_step}: div_lead={div_str}, ttc_lead={ttc_str}")
 
     # Plot
     fig, ax = plt.subplots(figsize=(8, 5))
     if div_leads:
-        ax.hist(div_leads, bins=10, alpha=0.7, color='#e74c3c', label=f'Divergence (n={len(div_leads)})')
-        print(f"  Divergence lead times: mean={np.mean(div_leads):.2f}s, "
+        ax.hist(div_leads, bins=10, alpha=0.7, color='#e74c3c', label=f'Conflict (n={len(div_leads)})')
+        print(f"  Conflict lead times: mean={np.mean(div_leads):.2f}s, "
               f"median={np.median(div_leads):.2f}s")
     if ttc_leads:
         ax.hist(ttc_leads, bins=10, alpha=0.7, color='#3498db', label=f'TTC (n={len(ttc_leads)})')
@@ -315,8 +390,9 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
               f"median={np.median(ttc_leads):.2f}s")
     ax.set_xlabel('Lead time before failure (seconds)')
     ax.set_ylabel('Count')
-    ax.set_title('Lead-time distribution: Divergence vs TTC')
-    ax.legend()
+    ax.set_title('Lead-time distribution: temporal conflict vs TTC')
+    if div_leads or ttc_leads:
+        ax.legend()
     plt.tight_layout()
     fig.savefig(out_dir / 'task6_lead_time.png', dpi=150)
     plt.close(fig)
@@ -332,7 +408,7 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
 def _single_mode_divergence(timesteps):
     """Ablation: use only the top-scoring trajectory (no multi-modal sampling)."""
     N = len(timesteps)
-    div = np.zeros(N)
+    div = np.full(N, np.nan)
     for i, t in enumerate(timesteps):
         trajs = t['planner_trajs']   # (K, T, 2)
         scores = t['planner_scores'] # (K,)
@@ -343,18 +419,29 @@ def _single_mode_divergence(timesteps):
         trajs_1 = trajs[top1:top1+1]
         scores_1 = np.array([1.0])
 
-        if occ.max() > 1e-6:
-            p = rasterize_planner(trajs_1, scores_1)
-            q = occ / (occ.sum() + 1e-10)
-            div[i] = js_divergence(p, q)
+        occupancy_future = np.asarray(t.get('occupancy_future', occ[None, ...]))
+        occupancy_valid = np.asarray(
+            t.get('occupancy_future_valid', np.ones(len(occupancy_future), dtype=bool)),
+            dtype=bool,
+        )
+        valid_slices = occupancy_valid & np.array([o.max() > 1e-6 for o in occupancy_future], dtype=bool)
+
+        if valid_slices.any():
+            planner_future = rasterize_planner_temporal(trajs_1, scores_1)
+            n_slices = min(len(planner_future), len(occupancy_future))
+            conflicts = []
+            for h in range(n_slices):
+                if not valid_slices[h]:
+                    continue
+                q = _align_occupancy_to_planner_bev(occupancy_future[h]).astype(np.float64)
+                q = q / (q.sum() + 1e-10)
+                js = js_divergence(planner_future[h], q)
+                conflicts.append(js_conflict_score(js))
+            div[i] = float(np.mean(conflicts)) if conflicts else 0.0
         else:
-            div[i] = 0.0  # no occupancy: undefined, not degenerate spread
+            # Fallback to single-mode endpoint variance (which is 0)
+            div[i] = np.nan
     return div
-
-
-def _no_temporal_smoothing(divergence_raw):
-    """Ablation: no temporal aggregation (use raw D(t))."""
-    return divergence_raw.copy()
 
 
 def task7_ablation(signals, labels, timesteps, out_dir):
@@ -368,10 +455,10 @@ def task7_ablation(signals, labels, timesteps, out_dir):
     print("TASK 7: ABLATION STUDY")
     print("="*60)
 
-    full_div = signals['divergence_smooth']
+    full_div = signals['temporal_conflict_smooth']
     full_auroc = roc_auc(full_div, labels)
     full_auprc = pr_auc(full_div, labels)
-    print(f"  Full divergence (smooth, multi-modal): "
+    print(f"  Full temporal conflict (smooth, multi-modal): "
           f"AUROC={full_auroc:.3f}, AUPRC={full_auprc:.3f}")
 
     # Ablation A: single mode
@@ -382,7 +469,7 @@ def task7_ablation(signals, labels, timesteps, out_dir):
           f"AUROC={auroc_a:.3f}, AUPRC={auprc_a:.3f}")
 
     # Ablation B: no temporal smoothing
-    div_raw = signals['divergence_raw']
+    div_raw = signals['temporal_conflict_raw']
     auroc_b = roc_auc(div_raw, labels)
     auprc_b = pr_auc(div_raw, labels)
     print(f"  Ablation B (no temporal smoothing):    "
@@ -420,26 +507,28 @@ def task7_ablation(signals, labels, timesteps, out_dir):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_time_series(signals, labels, timesteps, out_dir, fps=20):
-    """Plot D(t), TTC_inv, dist_inv, and failure labels over time."""
+    """Plot temporal conflict, TTC proxy/relative risk, distance proxy risk, and labels."""
     N = len(timesteps)
     t_axis = np.arange(N) / fps
 
     fig, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
 
     ax = axes[0]
-    ax.plot(t_axis, signals['divergence_smooth'], color='#e74c3c', label='D(t) smooth')
-    ax.plot(t_axis, signals['divergence_raw'], color='#e74c3c', alpha=0.3, linewidth=0.8, label='D(t) raw')
-    ax.set_ylabel('Divergence D(t)')
+    ax.plot(t_axis, signals['temporal_conflict_smooth'], color='#e74c3c', label='Conflict smooth')
+    ax.plot(t_axis, signals['temporal_conflict_raw'], color='#e74c3c', alpha=0.3, linewidth=0.8, label='Conflict raw')
+    ax.set_ylabel('Temporal Conflict')
     ax.legend(fontsize=8)
 
     ax = axes[1]
-    ax.plot(t_axis, signals['ttc_inv'], color='#3498db', label='1/TTC')
-    ax.set_ylabel('1/TTC')
+    ax.plot(t_axis, signals['ttc_proxy_risk'], color='#3498db', label='TTC proxy risk')
+    if 'ttc_rel_risk' in signals and np.isfinite(signals['ttc_rel_risk']).any():
+        ax.plot(t_axis, signals['ttc_rel_risk'], color='#8e44ad', alpha=0.8, label='Actor-relative TTC risk')
+    ax.set_ylabel('TTC Risk')
     ax.legend(fontsize=8)
 
     ax = axes[2]
-    ax.plot(t_axis, signals['dist_inv'], color='#2ecc71', label='1/dist')
-    ax.set_ylabel('1/dist')
+    ax.plot(t_axis, signals['dist_proxy_risk'], color='#2ecc71', label='Distance proxy risk')
+    ax.set_ylabel('Dist Risk')
     ax.legend(fontsize=8)
 
     ax = axes[3]
@@ -462,24 +551,22 @@ def plot_time_series(signals, labels, timesteps, out_dir, fps=20):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Event-level metrics (Issue 5)
+# Event-level metrics
 # ─────────────────────────────────────────────────────────────────────────────
 
 def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
     """
     Event-level AUROC/AUPRC: one sample per collision event.
-    For each collision, take max divergence / min TTC in the pre-failure window.
-    For each safe window (same length, randomly sampled), take the same.
-    This avoids dense-window inflation.
     """
     print("\n" + "="*60)
     print("EVENT-LEVEL METRICS")
     print("="*60)
 
     pre_frames = int(pre_window_s * fps)
-    div = signals['divergence_smooth']
-    ttc_inv = signals['ttc_inv']
-    dist_inv = signals['dist_inv']
+    div = signals['temporal_conflict_smooth']
+    ttc_key = preferred_ttc_key(signals)
+    ttc_risk = signals[ttc_key]
+    dist_risk = signals['dist_proxy_risk']
 
     # Find actual collision frames
     collision_steps = []
@@ -499,9 +586,9 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
     pos_div, pos_ttc, pos_dist = [], [], []
     for cs in collision_steps:
         start = max(0, cs - pre_frames)
-        pos_div.append(div[start:cs].max())
-        pos_ttc.append(ttc_inv[start:cs].max())
-        pos_dist.append(dist_inv[start:cs].max())
+        pos_div.append(finite_max(div[start:cs]))
+        pos_ttc.append(finite_max(ttc_risk[start:cs]))
+        pos_dist.append(finite_max(dist_risk[start:cs]))
 
     # Negative samples: balanced (1:1), safe windows far from any collision
     safe_candidates = [
@@ -514,9 +601,9 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
 
     neg_div, neg_ttc, neg_dist = [], [], []
     for i in neg_idx:
-        neg_div.append(div[i-pre_frames:i].max())
-        neg_ttc.append(ttc_inv[i-pre_frames:i].max())
-        neg_dist.append(dist_inv[i-pre_frames:i].max())
+        neg_div.append(finite_max(div[i-pre_frames:i]))
+        neg_ttc.append(finite_max(ttc_risk[i-pre_frames:i]))
+        neg_dist.append(finite_max(dist_risk[i-pre_frames:i]))
 
     scores_div  = np.array(pos_div  + neg_div)
     scores_ttc  = np.array(pos_ttc  + neg_ttc)
@@ -524,10 +611,44 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
     ev_labels   = np.array([1]*len(pos_div) + [0]*len(neg_div), dtype=float)
 
     print(f"  Events: {len(pos_div)} positive, {len(neg_div)} negative (balanced 1:1)")
-    for name, s in [('divergence', scores_div), ('ttc_inv', scores_ttc), ('dist_inv', scores_dist)]:
+    for name, s in [('temporal_conflict', scores_div), (ttc_key, scores_ttc), ('dist_proxy_risk', scores_dist)]:
         auroc = roc_auc(s, ev_labels)
         auprc = pr_auc(s, ev_labels)
         print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
+
+
+def task_baseline_sensitivity(all_routes_ts, eval_mask, labels_occ):
+    """Report baseline AUROC sensitivity to declared horizons, taus, and smoothing."""
+    print("\n=== BASELINE SENSITIVITY (pre-impact eval mask) ===")
+
+    specs = [
+        ('smoothing_window', [1, 3, 5, 10]),
+        ('ttc_horizon', [3.0, 5.0, 7.0]),
+        ('ttc_tau', [1.0, 1.5, 3.0]),
+        ('dist_horizon', [20.0, 30.0, 50.0]),
+        ('dist_tau', [5.0, 10.0, 15.0]),
+    ]
+    score_keys = ['ttc_proxy_risk', 'ttc_rel_risk', 'dist_proxy_risk', 'rss_proxy']
+
+    for param, values in specs:
+        print(f"  {param}:")
+        for value in values:
+            kwargs = {param: value}
+            route_scores = []
+            for route_ts in all_routes_ts:
+                route_scores.append(compute_baseline_series(route_ts, **kwargs))
+
+            merged = {
+                key: np.concatenate([scores[key] for scores in route_scores])
+                for key in score_keys
+            }
+            parts = []
+            for key in score_keys:
+                s = merged[key][eval_mask]
+                if not np.isfinite(s).any():
+                    continue
+                parts.append(f"{key}={roc_auc(s, labels_occ):.3f}")
+            print(f"    {value}: " + ("  ".join(parts) if parts else "no finite baseline scores"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -558,9 +679,21 @@ def main():
         print("Provide --route or --routes"); return
 
     timesteps = []
-    all_routes_ts = []  # store per-route timesteps for horizon sensitivity
-    all_div_signals = {k: [] for k in ['divergence_raw', 'divergence_smooth', 'planner_spread', 'has_occupancy']}
-    all_base_signals = {k: [] for k in ['ttc_raw', 'dist_raw', 'ttc_inv', 'dist_inv', 'rss', 'speed']}
+    all_routes_ts = [] 
+    all_div_signals = {
+        k: [] for k in [
+            'temporal_conflict_raw',
+            'temporal_conflict_smooth',
+            'temporal_js_raw',
+            'temporal_js_smooth',
+            'temporal_valid_count',
+            'divergence_raw',
+            'divergence_smooth',
+            'planner_spread',
+            'has_occupancy',
+        ]
+    }
+    all_base_signals = None
     per_route_signals = []
     per_route_labels  = []
 
@@ -575,6 +708,8 @@ def main():
         # Compute signals per-route so temporal smoothing doesn't cross boundaries
         div = compute_divergence_series(route_ts, use_occupancy=True, temporal_window=5)
         base = compute_baseline_series(route_ts)
+        if all_base_signals is None:
+            all_base_signals = {k: [] for k in base}
         for k in all_div_signals:
             all_div_signals[k].append(div[k])
         for k in all_base_signals:
@@ -596,37 +731,61 @@ def main():
 
     # Merge into one signals dict
     signals = {**div_signals, **base_signals}
+    
+    # Extract actual collision status (detection) vs future labels (prediction)
+    collision_mask = np.array([t.get('collision', False) for t in timesteps], dtype=bool)
+    time_to_collision = np.array([
+        np.nan if t.get('time_to_collision') is None else float(t.get('time_to_collision'))
+        for t in timesteps
+    ], dtype=np.float64)
+
     if args.label == 'collision':
         labels = np.array([t['future_collision'] for t in timesteps], dtype=np.float64)
     else:
         labels = np.array([t['future_collision'] or t.get('future_near_miss', False)
                            for t in timesteps], dtype=np.float64)
+    
     print(f"\nLabel: {args.label}  |  positive rate: {labels.mean():.3f}  ({int(labels.sum())}/{len(labels)})")
 
-    # ── Issue 6: Occupancy-valid mask (core paper metrics use this) ──────────
-    occ_valid = signals['has_occupancy'].astype(bool)
-    signals_occ = {k: v[occ_valid] for k, v in signals.items()}
-    labels_occ  = labels[occ_valid]
-    ts_occ      = [t for t, v in zip(timesteps, occ_valid) if v]
-    print(f"  Occupancy-valid frames: {occ_valid.sum()}/{len(timesteps)} "
+    # ── Issue 6: Evaluation Mask (Occupancy-valid AND Not-Currently-Crashing) ──
+    # We exclude frames where collision=True to measure PREDICTION, not DETECTION.
+    at_impact = collision_mask | (time_to_collision == 0.0)
+    eval_mask = signals['has_occupancy'].astype(bool) & (~at_impact)
+    
+    signals_occ = {k: v[eval_mask] for k, v in signals.items()}
+    labels_occ  = labels[eval_mask]
+    ts_occ      = [t for t, v in zip(timesteps, eval_mask) if v]
+    
+    print(f"  Evaluation frames (occ-valid & pre-impact): {eval_mask.sum()}/{len(timesteps)} "
           f"(positive rate: {labels_occ.mean():.3f})")
-    per_route_labels_occ = [l[s['has_occupancy'].astype(bool)]
-                             for s, l in zip(per_route_signals, per_route_labels)]
-    per_route_signals_occ = [{k: v[s['has_occupancy'].astype(bool)] for k, v in s.items()}
-                              for s in per_route_signals]
 
-    # ── Issue 2: All-frame baselines (supplemental) ──────────────────────────
-    print("\n=== ALL-FRAME BASELINES (supplemental, no occupancy mask) ===")
-    for name in ['ttc_inv', 'dist_inv', 'rss']:
+    # Update per-route splits for bootstrapping
+    per_route_eval_masks = []
+    for s, rt in zip(per_route_signals, all_routes_ts):
+        route_collision = np.array([t.get('collision', False) for t in rt], dtype=bool)
+        route_ttc = np.array([
+            np.nan if t.get('time_to_collision') is None else float(t.get('time_to_collision'))
+            for t in rt
+        ], dtype=np.float64)
+        per_route_eval_masks.append(s['has_occupancy'].astype(bool) & (~(route_collision | (route_ttc == 0.0))))
+    
+    per_route_labels_occ = [l[m] for l, m in zip(per_route_labels, per_route_eval_masks)]
+    per_route_signals_occ = [{k: v[m] for k, v in s.items()}
+                              for s, m in zip(per_route_signals, per_route_eval_masks)]
+
+    # All-frame baselines
+    print("\n=== ALL-FRAME BASELINES (diagnostic; core metrics use pre-impact mask) ===")
+    for name in available_keys(signals, BASELINE_SCORE_KEYS):
         a = roc_auc(signals[name], labels)
         print(f"  {name:15s}: AUROC={a:.3f}")
 
-    # ── Issue 5: Per-route AUROC reporting ───────────────────────────────────
-    print("\n=== PER-ROUTE AUROC (divergence_smooth vs ttc_inv) ===")
+    # Per-route AUROC
+    ttc_key = preferred_ttc_key(signals)
+    print(f"\n=== PER-ROUTE AUROC (temporal_conflict_smooth vs {ttc_key}) ===")
     route_aurocs_div, route_aurocs_ttc = [], []
-    for i, (rs, rl) in enumerate(zip(per_route_signals, per_route_labels)):
-        a_div = roc_auc(rs['divergence_smooth'], rl)
-        a_ttc = roc_auc(rs['ttc_inv'], rl)
+    for i, (rs, rl) in enumerate(zip(per_route_signals_occ, per_route_labels_occ)):
+        a_div = roc_auc(rs['temporal_conflict_smooth'], rl)
+        a_ttc = roc_auc(rs[ttc_key], rl)
         route_aurocs_div.append(a_div)
         route_aurocs_ttc.append(a_ttc)
         print(f"  Route {i+1}: div={a_div:.3f}  ttc={a_ttc:.3f}")
@@ -636,27 +795,18 @@ def main():
         print(f"  Mean ± std  div={np.mean(valid_div):.3f}±{np.std(valid_div):.3f}  "
               f"ttc={np.mean(valid_ttc):.3f}±{np.std(valid_ttc):.3f}")
 
-    # ── Issue 7: Delta AUROC with route bootstrap CI ─────────────────────────
-    print("\n=== DELTA AUROC: divergence_smooth − ttc_inv ===")
-    def delta_auroc(scores_pair, labels):
-        # scores_pair is concatenation of [div, ttc] — split by half
-        half = len(scores_pair) // 2
-        return roc_auc(scores_pair[:half], labels[:half]) - roc_auc(scores_pair[half:], labels[half:])
-
-    pr_div = [r['divergence_smooth'] for r in per_route_signals_occ]
-    pr_ttc = [r['ttc_inv']           for r in per_route_signals_occ]
-    pr_lbl = per_route_labels_occ
-    delta_point = (roc_auc(signals_occ['divergence_smooth'], labels_occ) -
-                   roc_auc(signals_occ['ttc_inv'], labels_occ))
-    # Route bootstrap on delta
+    # Delta AUROC
+    print(f"\n=== DELTA AUROC: temporal_conflict_smooth − {ttc_key} ===")
+    delta_point = (roc_auc(signals_occ['temporal_conflict_smooth'], labels_occ) -
+                   roc_auc(signals_occ[ttc_key], labels_occ))
     rng = np.random.default_rng(42)
-    R = len(pr_div)
+    R = len(per_route_signals_occ)
     delta_vals = []
     for _ in range(500):
         idx = rng.integers(0, R, R)
-        s_div = np.concatenate([pr_div[i] for i in idx])
-        s_ttc = np.concatenate([pr_ttc[i] for i in idx])
-        l     = np.concatenate([pr_lbl[i] for i in idx])
+        s_div = np.concatenate([per_route_signals_occ[i]['temporal_conflict_smooth'] for i in idx])
+        s_ttc = np.concatenate([per_route_signals_occ[i][ttc_key]              for i in idx])
+        l     = np.concatenate([per_route_labels_occ[i]                       for i in idx])
         d = roc_auc(s_div, l) - roc_auc(s_ttc, l)
         if not np.isnan(d):
             delta_vals.append(d)
@@ -665,66 +815,58 @@ def main():
         hi_d = np.percentile(delta_vals, 97.5)
         ci_type = "route-CI" if R >= 4 else "frame-CI"
         print(f"  Δ AUROC = {delta_point:+.3f}  95% CI [{lo_d:+.3f}, {hi_d:+.3f}] [{ci_type}]")
-    else:
-        print(f"  Δ AUROC = {delta_point:+.3f}  (CI unavailable)")
 
-    # ── Diagnostic time-series ───────────────────────────────────────────────
     print("\nPlotting time series...")
     plot_time_series(signals, labels, timesteps, out_dir)
 
-    # ── Task 4: AUROC / AUPRC (occupancy-valid frames) ───────────────────────
-    print("\n[Core metrics on occupancy-valid frames]")
+    print("\n[Core metrics on occupancy-valid, pre-impact frames]")
     task4_results = task4_auroc_auprc(signals_occ, labels_occ, out_dir,
                                       per_route_signals=per_route_signals_occ,
                                       per_route_labels=per_route_labels_occ)
 
-    # ── Task 5: Matched-bin separation ───────────────────────────────────────
     task5_matched_bin(signals_occ, labels_occ, ts_occ, out_dir)
-
-    # ── Task 6: Lead-time analysis ───────────────────────────────────────────
     task6_lead_time(signals, timesteps, out_dir)
+    task7_ablation(signals_occ, labels_occ, ts_occ, out_dir)
+    task_event_level(signals, timesteps, out_dir)
 
-    # ── Task 7: Ablation ─────────────────────────────────────────────────────
-    task7_ablation(signals, labels, timesteps, out_dir)
-
-    # ── Event-level metrics ───────────────────────────────────────────────────
-    task_event_level(signals_occ, ts_occ, out_dir)
-
-    # ── Horizon sensitivity (issue 1 fix: use stored all_routes_ts) ──────────
-    print("\n=== HORIZON SENSITIVITY (divergence_smooth AUROC) ===")
+    print("\n=== HORIZON SENSITIVITY (temporal_conflict_smooth AUROC) ===")
     for w in [1, 3, 5, 10]:
         chunks = []
         for route_ts in all_routes_ts:
             dv = compute_divergence_series(route_ts, use_occupancy=True, temporal_window=w)
-            chunks.append(dv['divergence_smooth'])
-        div_w = np.concatenate(chunks)[occ_valid]
+            chunks.append(dv['temporal_conflict_smooth'])
+        div_w = np.concatenate(chunks)[eval_mask]
         a = roc_auc(div_w, labels_occ)
         print(f"  window={w:2d}: AUROC={a:.3f}")
 
-    # ── Calibration (issue 4 fix: use < not <= for bin edges) ────────────────
-    print("\n=== CALIBRATION: divergence percentile vs failure rate ===")
-    div_s = signals_occ['divergence_smooth']
+    task_baseline_sensitivity(all_routes_ts, eval_mask, labels_occ)
+
+    print("\n=== CALIBRATION: temporal conflict percentile vs failure rate ===")
+    calibration_valid = np.isfinite(signals_occ['temporal_conflict_smooth'])
+    div_s = signals_occ['temporal_conflict_smooth'][calibration_valid]
+    labels_cal = labels_occ[calibration_valid]
+    if len(div_s) == 0:
+        print("  Temporal conflict unavailable; skipping calibration.")
+        return
     n_bins = 10
     percentile_edges = np.percentile(div_s, np.linspace(0, 100, n_bins + 1))
     bin_centers, fail_rates = [], []
     edges = list(zip(percentile_edges[:-1], percentile_edges[1:]))
     for b, (lo, hi) in enumerate(edges):
-        # Issue 4: use < hi except for final bin
         mask = (div_s >= lo) & (div_s < hi if b < len(edges)-1 else div_s <= hi)
-        if mask.sum() < 5:
-            continue
-        rate = labels_occ[mask].mean()
+        if mask.sum() < 5: continue
+        rate = labels_cal[mask].mean()
         bin_centers.append((lo + hi) / 2)
         fail_rates.append(rate)
-        print(f"  D(t) [{lo:.3f},{hi:.3f}): failure_rate={rate:.3f}  (n={mask.sum()})")
+        print(f"  conflict [{lo:.3f},{hi:.3f}): failure_rate={rate:.3f}  (n={mask.sum()})")
 
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(bin_centers, fail_rates, 'o-', color='#e74c3c')
-    ax.axhline(labels_occ.mean(), color='gray', linestyle='--', linewidth=0.8,
-               label=f'base rate ({labels_occ.mean():.3f})')
-    ax.set_xlabel('Divergence D(t)')
+    ax.axhline(labels_cal.mean(), color='gray', linestyle='--', linewidth=0.8,
+               label=f'base rate ({labels_cal.mean():.3f})')
+    ax.set_xlabel('Temporal conflict score')
     ax.set_ylabel('Empirical failure rate')
-    ax.set_title('Calibration: D(t) vs failure probability')
+    ax.set_title('Calibration: temporal conflict vs failure probability')
     ax.legend()
     plt.tight_layout()
     fig.savefig(out_dir / 'calibration.png', dpi=150)

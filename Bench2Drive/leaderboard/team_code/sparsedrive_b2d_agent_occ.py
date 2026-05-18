@@ -627,6 +627,13 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         # ========== COMPUTE OCCUPANCY AND BASELINE SIGNALS ==========
         guardian_intervene = False
         guardian_brake = 0.0
+        min_dist_valid = False
+        ttc_valid = False
+        ttc_rel = np.nan
+        ttc_rel_valid = False
+        ttc_rel_distance = np.nan
+        ttc_rel_closing_speed = np.nan
+        ttc_rel_actor_type = 'none'
 
         if self.guardian is not None:
             try:
@@ -642,6 +649,13 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 occ_meta = self.guardian.latest_occ_meta
                 min_dist = self.guardian.latest_min_dist
                 ttc = self.guardian.latest_ttc
+                min_dist_valid = getattr(self.guardian, 'latest_min_dist_valid', np.isfinite(min_dist))
+                ttc_valid = getattr(self.guardian, 'latest_ttc_valid', np.isfinite(ttc))
+                ttc_rel = getattr(self.guardian, 'latest_ttc_rel', np.nan)
+                ttc_rel_valid = getattr(self.guardian, 'latest_ttc_rel_valid', False)
+                ttc_rel_distance = getattr(self.guardian, 'latest_ttc_rel_distance', np.nan)
+                ttc_rel_closing_speed = getattr(self.guardian, 'latest_ttc_rel_closing_speed', np.nan)
+                ttc_rel_actor_type = getattr(self.guardian, 'latest_ttc_rel_actor_type', 'none')
 
                 # Disable intervention unless explicitly enabled
                 if not self.use_guardian:
@@ -654,14 +668,14 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 traceback.print_exc()
 
                 occ_grid = np.zeros((120,120), dtype=np.float32)
-                min_dist = 999.0
-                ttc = 999.0
+                min_dist = np.nan
+                ttc = np.nan
                 occ_meta = {'source': 'error', 'actor_count': 0}
 
         else:
             occ_grid = np.zeros((120,120), dtype=np.float32)
-            min_dist = 999.0
-            ttc = 999.0
+            min_dist = np.nan
+            ttc = np.nan
             occ_meta = {'source': 'none', 'actor_count': 0}
         
         # ========== DETECT COLLISION/NEAR-MISS ==========
@@ -707,6 +721,13 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 ego_speed=ego_speed,              # float
                 ttc=ttc,                          # float
                 min_distance=min_dist,            # float
+                ttc_valid=ttc_valid,
+                min_distance_valid=min_dist_valid,
+                ttc_rel=ttc_rel,
+                ttc_rel_valid=ttc_rel_valid,
+                ttc_rel_distance=ttc_rel_distance,
+                ttc_rel_closing_speed=ttc_rel_closing_speed,
+                ttc_rel_actor_type=ttc_rel_actor_type,
                 collision=collision_occurred,              # bool
                 near_miss=near_miss,              # bool
                 metadata={
@@ -729,24 +750,6 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         
         if brake_traj < 0.05: brake_traj = 0.0
         if throttle_traj > brake_traj: brake_traj = 0.0
-
-        # ========== STUCK RECOVERY ==========
-        # Agent runs at 20Hz; 80 steps ≈ 4s of no movement
-        if ego_speed < 0.1:
-            self.stuck_detector += 1
-        else:
-            self.stuck_detector = 0
-            self.last_moving_step = self.step
-
-        if self.stuck_detector > 80:
-            self.forced_move = 40   # force throttle for ~2s
-            self.stuck_detector = 0
-
-        if self.forced_move > 0:
-            throttle_traj = max(throttle_traj, 0.4)
-            brake_traj = 0.0
-            self.forced_move -= 1
-        # =====================================
 
         # ========== APPLY GUARDIAN OVERRIDE ==========
         if guardian_intervene:

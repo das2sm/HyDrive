@@ -55,9 +55,11 @@ def _normalise_scores(planner_scores):
     return np.ones_like(scores, dtype=np.float64) / max(len(scores), 1)
 
 
-def _normalise_occupancy_grid(grid):
+def _normalise_occupancy_grid(grid, blur_sigma=1.5):
     grid = np.asarray(grid, dtype=np.float64)
     grid = np.clip(grid, 0.0, None)
+    if grid.max() > 1e-12:
+        grid = cv2.GaussianBlur(grid, (0, 0), blur_sigma)
     total = grid.sum()
     if total > 1e-12:
         return grid / total
@@ -284,9 +286,10 @@ def _align_occupancy_to_planner_bev(occ):
     """
     Align Guardian occupancy grid (row=right, col=forward) 
     to planner BEV (row=ahead_inverted, col=left).
-    Transformation: Transpose then flip both axes.
+    Transformation: Transpose, flip both axes, then roll 1px
+    down-right to align the even-sized grid centers.
     """
-    return occ.T[::-1, ::-1]
+    return np.roll(occ.T[::-1, ::-1], shift=1, axis=(0, 1))
 
 
 def check_coordinate_alignment(planner_trajs, planner_scores, ego_forward_m=10.0):

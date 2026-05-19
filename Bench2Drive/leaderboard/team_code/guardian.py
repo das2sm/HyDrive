@@ -55,7 +55,7 @@ class Guardian:
         self._path_block_confirmations = 0
         self._last_valid_traj = None
 
-        self.expensive_step_interval = 5   # compute every 5 steps (was 3, reduced frequency for performance)
+        self.expensive_step_interval = 2   # compute every 2 steps (reduces staleness while retaining some caching benefit)
         self._step_counter = 0
 
         self.skip_cri = True
@@ -66,7 +66,7 @@ class Guardian:
         self._cached_occ_meta = {'source': 'init', 'actor_count': 0}
         self._actor_list_cache = None
         self._actor_list_cache_age = 0
-        self._actor_list_cache_max_age = 10  # Refresh actor list every 10 frames
+        self._actor_list_cache_max_age = 3  # Refresh actor list every 3 frames
         
         settings = self.world.get_settings() if self.world is not None else None
         self.fixed_delta_seconds = (

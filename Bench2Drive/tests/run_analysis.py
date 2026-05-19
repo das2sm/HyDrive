@@ -37,6 +37,7 @@ from divergence import (
     js_divergence,
     js_conflict_score,
     _align_occupancy_to_planner_bev,
+    _normalise_occupancy_grid,
 )
 from baselines import compute_baseline_series
 
@@ -456,7 +457,7 @@ def _single_mode_divergence(timesteps):
                 if not valid_slices[h]:
                     continue
                 q = _align_occupancy_to_planner_bev(occupancy_future[h]).astype(np.float64)
-                q = q / (q.sum() + 1e-10)
+                q = _normalise_occupancy_grid(q)
                 js = js_divergence(planner_future[h], q)
                 conflicts.append(js_conflict_score(js))
             div[i] = float(np.mean(conflicts)) if conflicts else 0.0

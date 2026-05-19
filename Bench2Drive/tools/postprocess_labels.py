@@ -41,14 +41,16 @@ def compute_future_labels(timesteps):
     total_steps = len(timesteps)
 
     for i in range(total_steps):
-
-        end_idx = min(i + FUTURE_WINDOW, total_steps)
+        # Look ahead from i+1 (not i) so the label at time t reflects
+        # future collisions, not the current moment.
+        start = i + 1
+        end_idx = min(start + FUTURE_WINDOW, total_steps)
 
         future_collision = False
         collision_frames = None
 
         # Search future horizon
-        for j in range(i, end_idx):
+        for j in range(start, end_idx):
             step_data = timesteps[j]
 
             # Collision detection

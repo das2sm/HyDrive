@@ -21,7 +21,7 @@ Code lives in `Bench2Drive/` (a SparseDriveV2 fork with Guardian + divergence lo
 ## Data pipeline
 
 1. **Simulate**: `bash scripts/debug_b2d.sh <ROUTE_NAME>` → raw `.pkl` at `close_loop_log/save/<ROUTE>/divergence_logs/route_<ROUTE>.pkl`
-2. **Postprocess**: `python tools/postprocess_labels.py --input <raw.pkl> --output processed/<route>_processed.pkl` → adds `future_collision`, `time_to_collision`
+2. **Postprocess**: `python tests/process_logs.py --input <raw.pkl> --out processed/` → adds `future_collision`, `future_near_miss`, `time_to_collision`
 3. **Analyze**: `python tests/run_analysis.py --route processed/<route>_processed.pkl --out analysis/results`
 
 Batch workflow: `bash scripts/run_batch.sh` (runs a curated route list), or `bash scripts/run_all_routes.sh` (discovers all routes).
@@ -54,17 +54,27 @@ Alignment is `np.roll(occ.T[::-1, ::-1], shift=1, axis=(0,1))` (`_align_occupanc
 
 ## Guardian performance
 
-- Actor list cached for 3 frames, occupancy recomputed every `expensive_step_interval=2` steps.
+- Actor list refreshed every frame (`_actor_list_cache_max_age=1`). Occupancy recomputed every step (`expensive_step_interval=1`).
 - `skip_cri` and `skip_path_blockage` are `True` by default (expensive features disabled for research logging).
 - Intervention is disabled (`intervene = False`).
 
 ## Postprocessing labels
 
-- Only `tools/postprocess_labels.py` is used (not `tests/process_logs.py`). Both now use `i+1` lookahead start (future-only, excludes current frame).
+- `tests/process_logs.py` (formerly `tools/postprocess_labels.py`) adds `future_collision`, `future_near_miss`, `time_to_collision` to each timestep.
+- Uses `i+10` lookahead start (0.5s offset) to align with the planner's first waypoint. `time_to_collision` is measured from frame `i`, not from window start.
 
 ## Occupancy normalization
 
 - `_normalise_occupancy_grid` in `tests/divergence.py` applies Gaussian blur (sigma=1.5) before normalization to prevent sparse occupancy producing unstable probability distributions.
+
+## Reproducibility
+
+- Agent sets `random.seed(42)`, `np.random.seed(42)`, `torch.manual_seed(42)`, and `torch.cuda.manual_seed_all(42)` in `setup()`. The scenario runner also uses `CarlaDataProvider._random_seed = 2000` for environment spawning.
+- Simulations are reproducible only when the full stack (CARLA, model weights, agent config, route XML) is frozen.
+
+## `near_miss` label caveat
+
+The `near_miss` label (in agent) is defined using Guardian's `min_dist` and `ttc`, which are the same signals used as baselines. Using `--label any_failure` in analysis creates circularity. The default `--label collision` avoids this issue.
 
 ## CARLA simulation env vars
 

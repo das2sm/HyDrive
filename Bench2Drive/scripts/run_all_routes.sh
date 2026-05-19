@@ -56,9 +56,9 @@ for ROUTE in "${ALL_ROUTES[@]}"; do
 
     # 3. Postprocess labels
     if [ -f "$RAW_PKL" ]; then
-        conda run -n sparsedrive python "$ROOT/tools/postprocess_labels.py" \
+        conda run -n sparsedrive python "$ROOT/tests/process_logs.py" \
             --input "$RAW_PKL" \
-            --output "$OUT_PKL"
+            --out "$PROCESSED_DIR"
         echo "  ✓ Postprocessed → $OUT_PKL"
         RUN=$((RUN + 1))
     else

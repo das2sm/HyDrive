@@ -37,25 +37,26 @@ def process_route(input_path, output_dir, horizon_seconds=3.0):
     collisions = np.array([t.get('collision', False) for t in timesteps], dtype=bool)
     near_misses = np.array([t.get('near_miss', False) for t in timesteps], dtype=bool)
     
+    # First meaningful planner waypoint is at 0.5s, so we start lookahead there
+    lookahead_start_offset = int(0.5 * fps)
+
     for i in range(num_steps):
-        # Define lookahead window [i+1, i+1+horizon]
-        # We start from i+1 because at time t, we want to know if we WILL crash.
-        start = i + 1
+        # Define lookahead window [i+lookahead_start_offset, i+1+horizon]
+        # The offset matches the planner's first waypoint at 0.5s so labels
+        # align with what the divergence signal can actually observe.
+        start = min(num_steps, i + lookahead_start_offset)
         end = min(num_steps, i + 1 + horizon_frames)
-        
+
         window_collisions = collisions[start:end]
         window_near_misses = near_misses[start:end]
-        
+
         # 1. Future Binary Labels
         timesteps[i]['future_collision'] = bool(np.any(window_collisions))
         timesteps[i]['future_near_miss'] = bool(np.any(window_near_misses))
-        
-        # 2. Time to Collision (TTE)
-        # Find first collision index in the remaining episode
+
+        # 2. Time to Collision (TTE) — time from current frame i to first collision
         future_collision_indices = np.where(collisions[i:])[0]
         if len(future_collision_indices) > 0:
-            # i + first_idx is the absolute step of collision
-            # (i + first_idx - i) / fps is the time
             timesteps[i]['time_to_collision'] = float(future_collision_indices[0] / fps)
         else:
             timesteps[i]['time_to_collision'] = None

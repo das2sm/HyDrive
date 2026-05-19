@@ -613,30 +613,51 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
         pos_ttc.append(finite_max(ttc_risk[start:cs]))
         pos_dist.append(finite_max(dist_risk[start:cs]))
 
-    # Negative samples: balanced (1:1), safe windows far from any collision
+    # Negative samples: safe windows far from any collision
     safe_candidates = [
         i for i in range(pre_frames, len(timesteps) - pre_frames)
         if not any(abs(i - cs) < pre_frames * 2 for cs in collision_steps)
     ]
     rng = np.random.default_rng(42)
-    n_neg = min(len(pos_div), len(safe_candidates))  # balanced 1:1
-    neg_idx = rng.choice(safe_candidates, n_neg, replace=False)
+    n_neg_balanced = min(len(pos_div), len(safe_candidates))  # balanced 1:1
+    neg_idx_balanced = rng.choice(safe_candidates, n_neg_balanced, replace=False)
 
-    neg_div, neg_ttc, neg_dist = [], [], []
-    for i in neg_idx:
-        neg_div.append(finite_max(div[i-pre_frames:i]))
-        neg_ttc.append(finite_max(ttc_risk[i-pre_frames:i]))
-        neg_dist.append(finite_max(dist_risk[i-pre_frames:i]))
+    neg_div_bal, neg_ttc_bal, neg_dist_bal = [], [], []
+    for i in neg_idx_balanced:
+        neg_div_bal.append(finite_max(div[i-pre_frames:i]))
+        neg_ttc_bal.append(finite_max(ttc_risk[i-pre_frames:i]))
+        neg_dist_bal.append(finite_max(dist_risk[i-pre_frames:i]))
 
-    scores_div  = np.array(pos_div  + neg_div)
-    scores_ttc  = np.array(pos_ttc  + neg_ttc)
-    scores_dist = np.array(pos_dist + neg_dist)
-    ev_labels   = np.array([1]*len(pos_div) + [0]*len(neg_div), dtype=float)
+    # Also collect natural-prevalence negatives (all safe windows)
+    neg_div_nat, neg_ttc_nat, neg_dist_nat = [], [], []
+    for i in safe_candidates:
+        neg_div_nat.append(finite_max(div[i-pre_frames:i]))
+        neg_ttc_nat.append(finite_max(ttc_risk[i-pre_frames:i]))
+        neg_dist_nat.append(finite_max(dist_risk[i-pre_frames:i]))
 
-    print(f"  Events: {len(pos_div)} positive, {len(neg_div)} negative (balanced 1:1)")
-    for name, s in [('temporal_conflict', scores_div), (ttc_key, scores_ttc), ('dist_proxy_risk', scores_dist)]:
-        auroc = roc_auc(s, ev_labels)
-        auprc = pr_auc(s, ev_labels)
+    # Balanced evaluation (1:1)
+    scores_div_bal  = np.array(pos_div  + neg_div_bal)
+    scores_ttc_bal  = np.array(pos_ttc  + neg_ttc_bal)
+    scores_dist_bal = np.array(pos_dist + neg_dist_bal)
+    ev_labels_bal   = np.array([1]*len(pos_div) + [0]*len(neg_div_bal), dtype=float)
+
+    print(f"\n  Events: {len(pos_div)} positive, {len(neg_div_bal)} negative (balanced 1:1)")
+    for name, s in [('temporal_conflict', scores_div_bal), (ttc_key, scores_ttc_bal), ('dist_proxy_risk', scores_dist_bal)]:
+        auroc = roc_auc(s, ev_labels_bal)
+        auprc = pr_auc(s, ev_labels_bal)
+        print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
+
+    # Natural-prevalence evaluation (true base rate)
+    scores_div_nat  = np.array(pos_div  + neg_div_nat)
+    scores_ttc_nat  = np.array(pos_ttc  + neg_ttc_nat)
+    scores_dist_nat = np.array(pos_dist + neg_dist_nat)
+    ev_labels_nat   = np.array([1]*len(pos_div) + [0]*len(neg_div_nat), dtype=float)
+    prev = len(pos_div) / (len(pos_div) + len(neg_div_nat))
+
+    print(f"\n  Events: {len(pos_div)} positive, {len(neg_div_nat)} negative (natural prevalence={prev:.3f})")
+    for name, s in [('temporal_conflict', scores_div_nat), (ttc_key, scores_ttc_nat), ('dist_proxy_risk', scores_dist_nat)]:
+        auroc = roc_auc(s, ev_labels_nat)
+        auprc = pr_auc(s, ev_labels_nat)
         print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
 
 
@@ -772,7 +793,7 @@ def main():
 
     # ── Issue 6: Evaluation Mask (Occupancy-valid AND Not-Currently-Crashing) ──
     # We exclude frames where collision=True to measure PREDICTION, not DETECTION.
-    at_impact = collision_mask | (time_to_collision == 0.0)
+    at_impact = collision_mask | (np.abs(time_to_collision) < 1e-6)
     eval_mask = signals['has_occupancy'].astype(bool) & (~at_impact)
     
     signals_occ = {k: v[eval_mask] for k, v in signals.items()}

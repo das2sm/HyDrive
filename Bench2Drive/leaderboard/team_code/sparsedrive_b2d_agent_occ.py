@@ -5,6 +5,7 @@ import pathlib
 import time
 import copy
 import math
+import random
 from scipy.optimize import fsolve
 from pyquaternion import Quaternion
 from PIL import Image
@@ -84,6 +85,13 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         self.ckpt_path = config_parts[1]
         self.save_name = config_parts[2] if len(config_parts) >= 3 else "default_eval"
         self.gpu_rank = int(config_parts[3]) if len(config_parts) >= 4 else 0
+        
+        # Fixed seed for reproducibility
+        seed = 42
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
         
         self.step = -1
         self.wall_start = time.time()

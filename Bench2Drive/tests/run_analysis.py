@@ -233,10 +233,13 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
 # Task 5: Matched-bin separation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def task5_matched_bin(signals, labels, timesteps, out_dir):
+def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
     """
     Anti-TTC-collapse test: within each TTC/dist/speed bin,
     does temporal conflict still separate failure from safe?
+
+    Adds a complexity control via observed actor count and optionally
+    reports route-aware consistency when route_ids are available.
     """
     print("\n" + "="*60)
     print("TASK 5: MATCHED-BIN SEPARATION")
@@ -247,15 +250,21 @@ def task5_matched_bin(signals, labels, timesteps, out_dir):
     ttc_risk = signals[ttc_key]
     dist_risk = signals['dist_proxy_risk']
     speed = signals['speed']
+    num_actors = np.array([
+        t.get('metadata', {}).get('num_actors', np.nan)
+        for t in timesteps
+    ], dtype=np.float64)
 
     # Define binning variables and their edges
     bin_configs = [
-        ('speed',    speed,    np.array([0, 2, 5, 10, 30])),
+        ('speed',          speed,    np.array([0, 2, 5, 10, 30])),
         ('dist_proxy_risk', dist_risk, finite_percentile_edges(dist_risk, [0, 25, 50, 75, 100])),
-        (ttc_key, ttc_risk, finite_percentile_edges(ttc_risk, [0, 25, 50, 75, 100])),
+        (ttc_key,          ttc_risk, finite_percentile_edges(ttc_risk, [0, 25, 50, 75, 100])),
+        ('num_actors',     num_actors, finite_percentile_edges(num_actors, [0, 25, 50, 75, 100])),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    axes = axes.flatten()
 
     for ax, (bin_name, bin_var, bin_edges) in zip(axes, bin_configs):
         if bin_edges is None or len(bin_edges) < 2:
@@ -266,7 +275,6 @@ def task5_matched_bin(signals, labels, timesteps, out_dir):
         bin_edges = np.unique(bin_edges)
         separations = []
         bin_labels = []
-        n_bins = len(bin_edges) - 1
 
         for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
             mask = (bin_var >= lo) & (bin_var < hi)
@@ -303,18 +311,32 @@ def task5_matched_bin(signals, labels, timesteps, out_dir):
     plt.close(fig)
     print(f"  → Saved task5_matched_bin.png")
 
+    if route_ids is not None:
+        unique_routes = np.unique(route_ids)
+        for route in unique_routes:
+            route_mask = route_ids == route
+            if route_mask.sum() < 10:
+                continue
+            route_fail = labels[route_mask].astype(bool)
+            if route_fail.sum() == 0 or (~route_fail).sum() == 0:
+                continue
+            route_auroc = roc_auc(div[route_mask], route_fail.astype(float))
+            print(f"  Route {int(route)} separation AUROC={route_auroc:.3f} (n={route_mask.sum()})")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Task 6: Lead-time analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
 def task6_lead_time(signals, timesteps, out_dir, fps=20,
-                    div_threshold_pct=75, ttc_threshold=2.0, sustain=3):
+                    div_threshold=0.5, ttc_threshold=2.0, sustain=3):
     """
     For each failure event, measure:
       - t_div: first time temporal conflict exceeds threshold before failure
       - t_ttc: first time TTC < ttc_threshold before failure
     Lead time = time_to_failure - t_signal.
+
+    Uses a fixed, pre-specified conflict threshold to avoid post-hoc tuning.
     """
     print("\n" + "="*60)
     print("TASK 6: LEAD-TIME ANALYSIS")
@@ -329,8 +351,8 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
         print("  Temporal conflict unavailable; skipping lead-time analysis.")
         return {'div_leads': [], 'ttc_leads': []}
 
-    div_thresh = np.percentile(div_finite, div_threshold_pct)
-    print(f"  Temporal conflict threshold (p{div_threshold_pct}): {div_thresh:.4f}")
+    div_thresh = float(div_threshold)
+    print(f"  Temporal conflict threshold: {div_thresh:.4f}")
     print(f"  TTC threshold: {ttc_threshold:.1f}s ({ttc_raw_key})")
 
     # Find actual collision frames (collision=True), deduplicated to one per event
@@ -759,6 +781,12 @@ def main():
     print(f"  Evaluation frames (occ-valid & pre-impact): {eval_mask.sum()}/{len(timesteps)} "
           f"(positive rate: {labels_occ.mean():.3f})")
 
+    route_ids = np.concatenate([
+        np.full(len(rt), i, dtype=int)
+        for i, rt in enumerate(all_routes_ts)
+    ])
+    route_ids_occ = route_ids[eval_mask]
+
     # Update per-route splits for bootstrapping
     per_route_eval_masks = []
     for s, rt in zip(per_route_signals, all_routes_ts):
@@ -824,7 +852,7 @@ def main():
                                       per_route_signals=per_route_signals_occ,
                                       per_route_labels=per_route_labels_occ)
 
-    task5_matched_bin(signals_occ, labels_occ, ts_occ, out_dir)
+    task5_matched_bin(signals_occ, labels_occ, ts_occ, out_dir, route_ids=route_ids_occ)
     task6_lead_time(signals, timesteps, out_dir)
     task7_ablation(signals_occ, labels_occ, ts_occ, out_dir)
     task_event_level(signals, timesteps, out_dir)

@@ -8,6 +8,7 @@ for auditability, but collision risk is expected to rise when planner futures
 overlap world occupancy futures, i.e. when JS divergence is low.
 """
 
+import cv2
 import numpy as np
 
 
@@ -16,6 +17,12 @@ GRID_H = 120
 GRID_W = 120
 GRID_RANGE = 30.0  # meters, symmetric around ego
 CELL_SIZE = GRID_RANGE * 2 / GRID_H  # 0.5 m/cell
+
+# Ego vehicle footprint used for planner footprint rasterization.
+VEHICLE_LENGTH_M = 4.8
+VEHICLE_WIDTH_M = 2.1
+VEHICLE_LONG_MARGIN_M = 1.2
+VEHICLE_LAT_MARGIN_M = 0.35
 
 # Trajectory
 TRAJ_WAYPOINTS = 6   # T waypoints per trajectory
@@ -48,42 +55,75 @@ def _normalise_scores(planner_scores):
     return np.ones_like(scores, dtype=np.float64) / max(len(scores), 1)
 
 
-def _add_gaussian(probability_grid, row_center, col_center, weight, sigma):
-    kernel_radius = int(np.ceil(3 * sigma))
-    kernel_offsets_y, kernel_offsets_x = np.mgrid[
-        -kernel_radius : kernel_radius + 1,
-        -kernel_radius : kernel_radius + 1,
-    ]
-    gaussian_kernel = np.exp(
-        -(kernel_offsets_y**2 + kernel_offsets_x**2) / (2 * sigma**2)
-    )
+def _normalise_occupancy_grid(grid):
+    grid = np.asarray(grid, dtype=np.float64)
+    grid = np.clip(grid, 0.0, None)
+    total = grid.sum()
+    if total > 1e-12:
+        return grid / total
+    return grid
 
-    row_pixel = int(round(row_center))
-    col_pixel = int(round(col_center))
 
-    row_start_full = row_pixel - kernel_radius
-    row_end_full = row_pixel + kernel_radius + 1
-    col_start_full = col_pixel - kernel_radius
-    col_end_full = col_pixel + kernel_radius + 1
+def _traj_pixel_yaw(traj_coords, idx):
+    if idx < len(traj_coords) - 1:
+        delta = traj_coords[idx + 1] - traj_coords[idx]
+    elif idx > 0:
+        delta = traj_coords[idx] - traj_coords[idx - 1]
+    else:
+        # Default to forward orientation [delta_row=-1, delta_col=0]
+        return 0.0
 
-    grid_row_start = max(row_start_full, 0)
-    grid_row_end = min(row_end_full, GRID_H)
-    grid_col_start = max(col_start_full, 0)
-    grid_col_end = min(col_end_full, GRID_W)
+    if np.linalg.norm(delta) < 1e-6:
+        return 0.0
 
-    kernel_row_start = max(0, -row_start_full)
-    kernel_row_end = kernel_row_start + (grid_row_end - grid_row_start)
-    kernel_col_start = max(0, -col_start_full)
-    kernel_col_end = kernel_col_start + (grid_col_end - grid_col_start)
+    # BEV Pixel Coordinates:
+    # Forward motion -> delta_row < 0, delta_col = 0
+    # Left motion -> delta_row = 0, delta_col > 0
+    # We want yaw=0 for forward. arctan2(y, x) with x=forward, y=left.
+    # So x = -delta_row, y = delta_col.
+    return float(np.arctan2(delta[1], -delta[0]))
 
-    if grid_row_end > grid_row_start and grid_col_end > grid_col_start:
-        probability_grid[
-            grid_row_start:grid_row_end,
-            grid_col_start:grid_col_end,
-        ] += weight * gaussian_kernel[
-            kernel_row_start:kernel_row_end,
-            kernel_col_start:kernel_col_end,
-        ]
+
+def _add_footprint(grid, row, col, yaw, weight, sigma):
+    """
+    Rasterize an oriented vehicle footprint blurred by Gaussian uncertainty.
+    This creates a proper probability distribution P_pi(x_t).
+    """
+    # Dimensions in pixels
+    half_l = VEHICLE_LENGTH_M / 2.0 / CELL_SIZE
+    half_w = VEHICLE_WIDTH_M / 2.0 / CELL_SIZE
+
+    # Corners in [forward, left] relative to center
+    corners_local = np.array([
+        [ half_l,  half_w],
+        [ half_l, -half_w],
+        [-half_l, -half_w],
+        [-half_l,  half_w]
+    ], dtype=np.float32)
+
+    # Rotation matrix (yaw 0 is forward)
+    c, s = np.cos(yaw), np.sin(yaw)
+    
+    # BEV Coordinate Mapping:
+    # Row decreases with forward motion. Col increases with left motion.
+    # OpenCV fillConvexPoly expects (x, y) coordinates which map to (col, row).
+    pts = np.zeros((4, 2), dtype=np.float32)
+    for i in range(4):
+        f, l = corners_local[i]
+        f_rot = f * c - l * s
+        l_rot = f * s + l * c
+        pts[i] = [float(col + l_rot), float(row - f_rot)]
+
+    mask = np.zeros_like(grid, dtype=np.float32)
+    cv2.fillConvexPoly(mask, pts.astype(np.int32), 1.0)
+
+    if sigma > 0.1:
+        # Uncertainty is modeled as spatial blurring of the footprint
+        ksize = int(2 * np.ceil(2 * sigma) + 1)
+        if ksize % 2 == 0: ksize += 1
+        mask = cv2.GaussianBlur(mask, (ksize, ksize), sigma)
+
+    grid += weight * mask.astype(np.float64)
 
 
 def _normalise_grid(grid):
@@ -94,17 +134,10 @@ def _normalise_grid(grid):
     return grid
 
 
-def rasterize_planner(planner_trajs, planner_scores, sigma=3.0):
+def rasterize_planner(planner_trajs, planner_scores, sigma_base=1.5, expansion_rate=0.4):
     """
     Rasterize weighted planner trajectories onto a BEV probability grid.
-
-    Args:
-        planner_trajs: (K, T, 2) ego-frame waypoints [left, forward]
-        planner_scores: (K,) probability weights (sum to 1)
-        sigma: Gaussian spread in pixels
-
-    Returns:
-        probability_grid: (H, W) normalised probability grid, sums to 1.
+    Uses OBB footprints and growing temporal uncertainty.
     """
     planner_trajs = np.asarray(planner_trajs, dtype=np.float64)
     if planner_trajs.ndim == 2:
@@ -115,22 +148,21 @@ def rasterize_planner(planner_trajs, planner_scores, sigma=3.0):
     waypoint_coords = _traj_to_bev_coords(planner_trajs)  # (K, T, 2)
     num_waypoints = waypoint_coords.shape[1]
 
-    for traj_idx, trajectory_weight in enumerate(planner_scores):
-        for waypoint_idx in range(num_waypoints):
-            row_center, col_center = waypoint_coords[traj_idx, waypoint_idx]
-            _add_gaussian(probability_grid, row_center, col_center, trajectory_weight, sigma)
+    for traj_idx, weight in enumerate(planner_scores):
+        traj_coords = waypoint_coords[traj_idx]
+        for t in range(num_waypoints):
+            row_center, col_center = traj_coords[t]
+            yaw = _traj_pixel_yaw(traj_coords, t)
+            sigma_t = sigma_base + (t * expansion_rate)
+            _add_footprint(probability_grid, row_center, col_center, yaw, weight, sigma_t)
 
-    # Normalise to a valid probability distribution
     return _normalise_grid(probability_grid)
 
 
-def rasterize_planner_temporal(planner_trajs, planner_scores, sigma=3.0):
+def rasterize_planner_temporal(planner_trajs, planner_scores, sigma_base=1.5, expansion_rate=0.4):
     """
     Rasterize each planner waypoint timestep separately.
-
-    Returns:
-        probability_grids: (T, H, W), one normalized BEV distribution per
-        future waypoint.
+    Implements linearly growing uncertainty: sigma_t = sigma_base + t * expansion_rate.
     """
     planner_trajs = np.asarray(planner_trajs, dtype=np.float64)
     if planner_trajs.ndim == 2:
@@ -141,12 +173,15 @@ def rasterize_planner_temporal(planner_trajs, planner_scores, sigma=3.0):
     num_waypoints = waypoint_coords.shape[1]
     probability_grids = np.zeros((num_waypoints, GRID_H, GRID_W), dtype=np.float64)
 
-    for waypoint_idx in range(num_waypoints):
-        grid = probability_grids[waypoint_idx]
-        for traj_idx, trajectory_weight in enumerate(planner_scores):
-            row_center, col_center = waypoint_coords[traj_idx, waypoint_idx]
-            _add_gaussian(grid, row_center, col_center, trajectory_weight, sigma)
-        probability_grids[waypoint_idx] = _normalise_grid(grid)
+    for t in range(num_waypoints):
+        sigma_t = sigma_base + (t * expansion_rate)
+        grid = probability_grids[t]
+        for traj_idx, weight in enumerate(planner_scores):
+            traj_coords = waypoint_coords[traj_idx]
+            row_center, col_center = traj_coords[t]
+            yaw = _traj_pixel_yaw(traj_coords, t)
+            _add_footprint(grid, row_center, col_center, yaw, weight, sigma_t)
+        probability_grids[t] = _normalise_grid(grid)
 
     return probability_grids
 
@@ -338,7 +373,7 @@ def compute_divergence_series(timesteps, use_occupancy=True, temporal_window=5):
                     continue
                 p_grid = planner_future[h]
                 q_grid = _align_occupancy_to_planner_bev(occupancy_future[h]).astype(np.float64)
-                q_grid = _normalise_grid(q_grid)
+                q_grid = _normalise_occupancy_grid(q_grid)
 
                 js = js_divergence(p_grid, q_grid)
                 js_values.append(js)

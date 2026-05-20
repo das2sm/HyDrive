@@ -588,9 +588,9 @@ class Guardian:
         bounding-circle clearance.
         """
         result = {
-            'ttc': np.inf,
+            'ttc': 99.0,
             'valid': True,
-            'distance': np.inf,
+            'distance': 99.0,
             'closing_speed': 0.0,
             'actor_type': 'none',
             'actor_id': -1,
@@ -628,7 +628,7 @@ class Guardian:
             })
             return result
 
-        best_ttc = np.inf
+        best_ttc = 99.0
         for actor in actors:
             try:
                 if hasattr(actor, 'attributes') and actor.attributes.get('role_name') == 'hero':

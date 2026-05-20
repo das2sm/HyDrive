@@ -66,7 +66,7 @@ def _extract_first_float(timesteps, keys, default=np.nan):
 
 
 def _extract_optional_bool(timesteps, keys):
-    vals = []
+    values = []
     seen = False
     for t in timesteps:
         value = None
@@ -76,27 +76,30 @@ def _extract_optional_bool(timesteps, keys):
                 value = candidate
                 seen = True
                 break
-        vals.append(bool(value) if value is not None else False)
+        values.append(bool(value))
     if not seen:
         return None
-    return np.array(vals, dtype=bool)
+    return np.array(values, dtype=bool)
 
 
 def _extract_metadata_string(timesteps, key, default=""):
     vals = []
     for t in timesteps:
         metadata = _get_field(t, "metadata", {}) or {}
-        vals.append(str(metadata.get(key, default)) if hasattr(metadata, "get") else default)
+        val = _get_field(metadata, key, default)
+        vals.append(str(val) if val is not None else default)
     return np.array(vals, dtype=object)
 
 
 def _causal_smooth(data, window):
     """Causal moving average that preserves NaN on frames with invalid current data."""
-    data = np.asarray(data, dtype=np.float64)
-    if len(data) == 0:
-        return data
+    if data is None or len(data) == 0:
+        return np.array([], dtype=np.float64)
+    
+    data = np.array(data, dtype=np.float64)
+    
     if window <= 1:
-        return data.copy()
+        return data
 
     smoothed = np.full_like(data, np.nan)
     for i in range(len(data)):
@@ -110,10 +113,10 @@ def _causal_smooth(data, window):
 
 
 def _infer_valid(raw, explicit_valid=None, source_invalid=None):
-    raw = np.asarray(raw, dtype=np.float64)
-    valid = (np.isfinite(raw) | np.isposinf(raw)) & (raw >= 0.0)
     if explicit_valid is not None:
-        valid &= explicit_valid
+        valid = np.asarray(explicit_valid, dtype=bool)
+    else:
+        valid = np.isfinite(raw) & (raw >= 0.0)
     if source_invalid is not None:
         valid &= ~source_invalid
     return valid
@@ -123,7 +126,7 @@ def _right_censor(raw, valid, horizon, censor_value):
     raw = np.asarray(raw, dtype=np.float64)
     clean = np.full_like(raw, np.nan)
 
-    censored = valid & (np.isposinf(raw) | (raw >= censor_value))
+    censored = valid & (raw >= censor_value)
     observed = valid & ~censored
 
     clean[censored] = horizon
@@ -150,23 +153,18 @@ def compute_baseline_series(
     """
     Compute causal heuristic baseline signals.
 
-    Publication-facing score keys:
+    Score keys:
       - ttc_proxy_risk: Guardian path-occupancy TTC proxy risk
       - dist_proxy_risk: Guardian path-occupancy distance proxy risk
       - ttc_rel_risk: actor-relative TTC risk when available in the log
       - rss_proxy: thresholded TTC/distance proxy
-
-    Legacy aliases (ttc_risk/dist_risk/ttc_raw/dist_raw) are retained for older
-    scripts, but new analyses should prefer the explicit proxy names.
     """
     n = len(timesteps)
     if n == 0:
         keys = [
-            "ttc_proxy_raw", "dist_proxy_raw", "ttc_rel_raw",
-            "ttc_proxy_clean", "dist_proxy_clean", "ttc_rel_clean",
-            "ttc_proxy_risk", "dist_proxy_risk", "ttc_rel_risk", "rss_proxy",
-            "speed", "ttc_proxy_valid", "dist_proxy_valid", "ttc_rel_valid",
-            "rss_proxy_valid", "ttc_raw", "dist_raw", "ttc_risk", "dist_risk",
+            "ttc_proxy_raw", "ttc_rel_raw",
+            "ttc_proxy_risk", "ttc_rel_risk", "dist_proxy_risk", "rss_proxy",
+            "speed",
         ]
         return {k: np.array([], dtype=np.float64) for k in keys}
 
@@ -180,7 +178,7 @@ def compute_baseline_series(
     ttc_rel_explicit = _extract_optional_bool(timesteps, ["ttc_rel_valid", "ttc_rel_min_valid"])
 
     occupancy_source = _extract_metadata_string(timesteps, "occupancy_source")
-    source_invalid = np.isin(occupancy_source, list(INVALID_OCCUPANCY_SOURCES))
+    source_invalid = np.isin(occupancy_source, INVALID_OCCUPANCY_SOURCES)
 
     speed_valid = np.isfinite(speed) & (speed >= -5.0) & (speed <= MAX_REALISTIC_SPEED)
     ttc_proxy_valid = _infer_valid(ttc_proxy_raw, ttc_proxy_explicit, source_invalid) & speed_valid
@@ -220,23 +218,10 @@ def compute_baseline_series(
 
     return {
         "ttc_proxy_raw": ttc_proxy_raw,
-        "dist_proxy_raw": dist_proxy_raw,
         "ttc_rel_raw": ttc_rel_raw,
-        "ttc_proxy_clean": ttc_proxy_clean,
-        "dist_proxy_clean": dist_proxy_clean,
-        "ttc_rel_clean": ttc_rel_clean,
         "ttc_proxy_risk": ttc_proxy_risk,
         "dist_proxy_risk": dist_proxy_risk,
         "ttc_rel_risk": ttc_rel_risk,
         "rss_proxy": rss_proxy,
         "speed": speed,
-        "ttc_proxy_valid": ttc_proxy_valid,
-        "dist_proxy_valid": dist_proxy_valid,
-        "ttc_rel_valid": ttc_rel_valid,
-        "rss_proxy_valid": rss_proxy_valid,
-        # Backward-compatible aliases.
-        "ttc_raw": ttc_proxy_raw,
-        "dist_raw": dist_proxy_raw,
-        "ttc_risk": ttc_proxy_risk,
-        "dist_risk": dist_proxy_risk,
     }

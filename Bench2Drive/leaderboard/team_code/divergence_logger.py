@@ -105,7 +105,7 @@ class DivergenceLogger:
 
         def infer_valid(value):
             value = clean_float(value)
-            return bool((np.isfinite(value) or np.isposinf(value)) and value >= 0.0)
+            return bool(np.isfinite(value) and value >= 0.0)
 
         ttc_value = clean_float(ttc)
         min_distance_value = clean_float(min_distance)

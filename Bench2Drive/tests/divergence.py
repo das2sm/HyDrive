@@ -300,6 +300,106 @@ def _align_occupancy_to_planner_bev(occ):
     return result
 
 
+def planner_conditioned_occupancy(timesteps, blur_sigma=0.0):
+    """
+    Planner-conditioned occupancy risk score.
+    
+    Instead of computing full-grid JS divergence, directly query the
+    aligned occupancy grid at each planner waypoint cell.  This isolates
+    "is there something where the planner expects to go?" from the
+    scene-wide occupancy statistics that dominate the full-grid JS.
+    
+    For each timestep i:
+      1. Convert K trajectory modes to BEV pixel coordinates.
+      2. For each waypoint h, align occupancy_future[h] to planner BEV.
+      3. Sample aligned occupancy at the (row, col) of each mode.
+      4. Weight by mode probability and average over waypoints.
+    
+    Parameters
+    ----------
+    timesteps : list of dict
+        Logger timesteps, each containing planner_trajs, planner_scores,
+        occupancy_grid, and optionally occupancy_future / occupancy_future_valid.
+    blur_sigma : float, default 0.0
+        Optional Gaussian blur applied to the aligned occupancy before
+        sampling.  0.0 = no blur (raw binary).  0.5 = light spatial spread.
+    
+    Returns
+    -------
+    risk : np.ndarray, shape (N,)
+        Per-timestep planner-conditioned occupancy score: the expected
+        occupancy probability at the planner's predicted trajectory cells.
+        NaN for steps with missing planner data or no valid occupancy.
+    has_valid : np.ndarray, shape (N,), bool
+        True for steps where the computation was valid.
+    """
+    N = len(timesteps)
+    risk = np.full(N, np.nan, dtype=np.float64)
+    has_valid = np.zeros(N, dtype=bool)
+
+    for i, t in enumerate(timesteps):
+        trajs = t['planner_trajs']
+        scores = t['planner_scores']
+        occ_current = t['occupancy_grid']
+
+        if trajs is None or scores is None or len(trajs) == 0:
+            continue
+
+        # Normalise scores to a probability distribution over modes
+        scores = np.asarray(scores, dtype=np.float64).ravel()
+        s_total = scores.sum()
+        if s_total < 1e-12:
+            scores = np.ones_like(scores) / max(len(scores), 1)
+        else:
+            scores = scores / s_total
+
+        K, T, _ = trajs.shape
+        bev = _traj_to_bev_coords(trajs)          # (K, T, 2) — (row, col)
+
+        # Occupancy future slices
+        if 'occupancy_future' in t:
+            occ_future = np.asarray(t['occupancy_future'])
+            occ_valid = np.asarray(
+                t.get('occupancy_future_valid',
+                      np.ones(len(occ_future), dtype=bool)),
+                dtype=bool,
+            )
+        else:
+            occ_future = np.asarray(occ_current)[None, ...]
+            occ_valid = np.array([True], dtype=bool)
+
+        h_max = min(T, len(occ_future))
+        total_risk = 0.0
+        n_valid = 0
+
+        for h in range(h_max):
+            if not occ_valid[h]:
+                continue
+
+            aligned = _align_occupancy_to_planner_bev(occ_future[h]).astype(np.float64)
+
+            if blur_sigma > 0.0 and aligned.max() > 1e-12:
+                aligned = cv2.GaussianBlur(aligned, (0, 0), blur_sigma)
+
+            # Sample occupancy at each mode's (row, col) for this waypoint
+            mode_vals = np.zeros(K, dtype=np.float64)
+            for k in range(K):
+                r = int(round(bev[k, h, 0]))
+                c = int(round(bev[k, h, 1]))
+                r = int(np.clip(r, 0, GRID_H - 1))
+                c = int(np.clip(c, 0, GRID_W - 1))
+                mode_vals[k] = aligned[r, c]
+
+            total_risk += float(np.sum(scores * mode_vals))
+            n_valid += 1
+
+        if n_valid > 0:
+            risk[i] = float(total_risk / n_valid)
+            has_valid[i] = True
+
+    return risk, has_valid
+
+
 def check_coordinate_alignment(planner_trajs, planner_scores, ego_forward_m=10.0):
     """
     Sanity check: place a synthetic obstacle directly ahead and verify that
@@ -414,6 +514,8 @@ def compute_divergence_series(timesteps, use_occupancy=True, temporal_window=5):
     return {
         'temporal_conflict_raw': temporal_conflict_raw,
         'temporal_conflict_smooth': temporal_conflict_smooth,
+        'temporal_agreement_raw': 1.0 - temporal_conflict_raw,
+        'temporal_agreement_smooth': 1.0 - temporal_conflict_smooth,
         'temporal_js_raw': temporal_js_raw,
         'temporal_js_smooth': temporal_js_smooth,
         'temporal_valid_count': temporal_valid_count,

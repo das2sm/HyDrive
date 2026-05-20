@@ -36,6 +36,7 @@ from divergence import (
     rasterize_planner_temporal,
     js_divergence,
     js_conflict_score,
+    planner_conditioned_occupancy,
     _align_occupancy_to_planner_bev,
     _normalise_occupancy_grid,
 )
@@ -164,7 +165,10 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
     candidates = {
         'temporal_conflict_smooth': signals['temporal_conflict_smooth'],
         'temporal_conflict_raw':    signals['temporal_conflict_raw'],
+        'temporal_agreement_smooth': signals['temporal_agreement_smooth'],
+        'temporal_agreement_raw':    signals['temporal_agreement_raw'],
         'planner_spread':           signals['planner_spread'],
+        'planner_conditioned_occupancy': signals['planner_conditioned_occupancy'],
     }
     for name in available_keys(signals, BASELINE_SCORE_KEYS):
         if name in signals:
@@ -202,7 +206,7 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
     auroc_errs_plot = np.nan_to_num(np.array(auroc_errs, dtype=float), nan=0.0)
     auprc_errs_plot = np.nan_to_num(np.array(auprc_errs, dtype=float), nan=0.0)
 
-    colors = ['#e74c3c' if 'conflict' in n else '#3498db' for n in names]
+    colors = ['#e74c3c' if 'conflict' in n else '#e67e22' if 'agreement' in n else '#2ecc71' if 'occupancy' in n else '#3498db' for n in names]
     ax = axes[0]
     bars = ax.bar(names, aurocs_plot, color=colors, yerr=auroc_errs_plot, capsize=4)
     ax.axhline(0.5, color='gray', linestyle='--', linewidth=0.8, label='random')
@@ -312,6 +316,54 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
     plt.close(fig)
     print(f"  → Saved task5_matched_bin.png")
 
+    # ── PCO matched-bin: same bins but using planner_conditioned_occupancy ──
+    pco = signals['planner_conditioned_occupancy']
+    fig2, axes2 = plt.subplots(2, 2, figsize=(15, 10))
+    axes2 = axes2.flatten()
+
+    for ax, (bin_name, bin_var, bin_edges) in zip(axes2, bin_configs):
+        if bin_edges is None or len(bin_edges) < 2:
+            ax.set_title(f'{bin_name}: unavailable')
+            ax.axis('off')
+            continue
+        bin_edges = np.unique(bin_edges)
+        separations, bin_labels = [], []
+
+        for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+            mask = (bin_var >= lo) & (bin_var < hi)
+            if mask.sum() < 5:
+                continue
+            fail = labels[mask].astype(bool)
+            if fail.sum() == 0 or (~fail).sum() == 0:
+                continue
+            mean_fail = pco[mask][fail].mean()
+            mean_safe = pco[mask][~fail].mean()
+            sep = mean_fail - mean_safe
+            bin_auroc = roc_auc(pco[mask], fail.astype(float))
+            try:
+                _, pval = mannwhitneyu(pco[mask][fail], pco[mask][~fail], alternative='greater')
+            except Exception:
+                pval = float('nan')
+            separations.append(sep)
+            bin_labels.append(f'[{lo:.2f},{hi:.2f})\nn={mask.sum()}')
+            sig = '*' if pval < 0.05 else ''
+            print(f"  [PCO] {bin_name} bin [{lo:.2f},{hi:.2f}): "
+                  f"n={mask.sum()}, fail={fail.sum()}, "
+                  f"sep={sep:+.4f}, bin-AUROC={bin_auroc:.3f}, p={pval:.3f}{sig}")
+
+        colors = ['#2ecc71' if s > 0 else '#3498db' for s in separations]
+        ax.bar(range(len(separations)), separations, color=colors)
+        ax.axhline(0, color='black', linewidth=0.8)
+        ax.set_xticks(range(len(bin_labels)))
+        ax.set_xticklabels(bin_labels, rotation=30, fontsize=8)
+        ax.set_title(f'PCO separation within {bin_name} bins')
+        ax.set_ylabel('mean(pco|fail) − mean(pco|safe)')
+
+    plt.tight_layout()
+    fig2.savefig(out_dir / 'task5_pco_matched_bin.png', dpi=150)
+    plt.close(fig2)
+    print(f"  → Saved task5_pco_matched_bin.png")
+
     if route_ids is not None:
         unique_routes = np.unique(route_ids)
         for route in unique_routes:
@@ -330,30 +382,41 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def task6_lead_time(signals, timesteps, out_dir, fps=20,
-                    div_threshold=0.5, ttc_threshold=2.0, sustain=3):
+                    div_threshold=0.10, pco_threshold=0.15, ttc_threshold=2.0, sustain=3):
     """
     For each failure event, measure:
       - t_div: first time temporal conflict exceeds threshold before failure
+      - t_agreement: first time planner-occupancy agreement exceeds threshold
+      - t_pco: first time planner_conditioned_occupancy exceeds threshold
       - t_ttc: first time TTC < ttc_threshold before failure
     Lead time = time_to_failure - t_signal.
 
     Uses a fixed, pre-specified conflict threshold to avoid post-hoc tuning.
+    Conflict threshold 0.10 corresponds to ~90th percentile of observed values.
+    Agreement threshold 0.90 is the complement (1 - conflict = agreement).
+    PCO threshold 0.15 is tuned to the observed collision-window distribution.
     """
     print("\n" + "="*60)
     print("TASK 6: LEAD-TIME ANALYSIS")
     print("="*60)
 
     div = signals['temporal_conflict_smooth']
+    agreement = signals['temporal_agreement_smooth']
+    pco = signals.get('planner_conditioned_occupancy', np.full(len(div), np.nan))
     ttc_raw_key = 'ttc_rel_raw' if 'ttc_rel_risk' in signals and np.isfinite(signals['ttc_rel_risk']).any() else 'ttc_proxy_raw'
     ttc_raw = signals[ttc_raw_key]
 
     div_finite = div[np.isfinite(div)]
     if len(div_finite) == 0:
         print("  Temporal conflict unavailable; skipping lead-time analysis.")
-        return {'div_leads': [], 'ttc_leads': []}
+        return {'div_leads': [], 'pco_leads': [], 'ttc_leads': []}
 
     div_thresh = float(div_threshold)
+    agreement_thresh = 1.0 - div_thresh
+    pco_thresh = float(pco_threshold)
     print(f"  Temporal conflict threshold: {div_thresh:.4f}")
+    print(f"  Planner-occupancy agreement threshold: {agreement_thresh:.4f}")
+    print(f"  Planner-conditioned occupancy threshold: {pco_thresh:.4f}")
     print(f"  TTC threshold: {ttc_threshold:.1f}s ({ttc_raw_key})")
 
     # Find actual collision frames (collision=True), deduplicated to one per event
@@ -369,6 +432,8 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
     print(f"  Actual collision frames: {len(collision_steps)}")
 
     div_leads = []
+    agreement_leads = []
+    pco_leads = []
     ttc_leads = []
 
     for collision_step in collision_steps:
@@ -385,6 +450,29 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
             div_lead = (collision_step - div_trigger) / fps
             div_leads.append(div_lead)
 
+        # Planner-occupancy agreement: inverse of conflict (high = dangerous)
+        agreement_trigger = None
+        agreement_lead = None
+        for j in range(search_start, collision_step - sustain + 1):
+            if np.all(agreement[j:j+sustain] > agreement_thresh):
+                agreement_trigger = j
+                break
+        if agreement_trigger is not None:
+            agreement_lead = (collision_step - agreement_trigger) / fps
+            agreement_leads.append(agreement_lead)
+
+        # Planner-conditioned occupancy: obstacle at planner's trajectory cell
+        pco_trigger = None
+        pco_lead = None
+        for j in range(search_start, collision_step - sustain + 1):
+            w = pco[j:j+sustain]
+            if np.all(np.isfinite(w) & (w > pco_thresh)):
+                pco_trigger = j
+                break
+        if pco_trigger is not None:
+            pco_lead = (collision_step - pco_trigger) / fps
+            pco_leads.append(pco_lead)
+
         # TTC: first causal sustained activation
         ttc_trigger = None
         ttc_lead = None
@@ -398,30 +486,40 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
             ttc_leads.append(ttc_lead)
 
         div_str = f"{div_lead:.2f}s" if div_lead is not None else "None"
+        agr_str = f"{agreement_lead:.2f}s" if agreement_lead is not None else "None"
+        pco_str = f"{pco_lead:.2f}s" if pco_lead is not None else "None"
         ttc_str = f"{ttc_lead:.2f}s" if ttc_lead is not None else "None"
-        print(f"  Collision at step {collision_step}: div_lead={div_str}, ttc_lead={ttc_str}")
+        print(f"  Collision at step {collision_step}: conflict={div_str}, agreement={agr_str}, pco={pco_str}, ttc={ttc_str}")
 
     # Plot
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(10, 5))
     if div_leads:
-        ax.hist(div_leads, bins=10, alpha=0.7, color='#e74c3c', label=f'Conflict (n={len(div_leads)})')
+        ax.hist(div_leads, bins=10, alpha=0.5, color='#e74c3c', label=f'Conflict (n={len(div_leads)})')
         print(f"  Conflict lead times: mean={np.mean(div_leads):.2f}s, "
               f"median={np.median(div_leads):.2f}s")
+    if agreement_leads:
+        ax.hist(agreement_leads, bins=10, alpha=0.5, color='#e67e22', label=f'Agreement (n={len(agreement_leads)})')
+        print(f"  Agreement lead times: mean={np.mean(agreement_leads):.2f}s, "
+              f"median={np.median(agreement_leads):.2f}s")
+    if pco_leads:
+        ax.hist(pco_leads, bins=10, alpha=0.5, color='#2ecc71', label=f'PCO (n={len(pco_leads)})')
+        print(f"  PCO lead times: mean={np.mean(pco_leads):.2f}s, "
+              f"median={np.median(pco_leads):.2f}s")
     if ttc_leads:
-        ax.hist(ttc_leads, bins=10, alpha=0.7, color='#3498db', label=f'TTC (n={len(ttc_leads)})')
+        ax.hist(ttc_leads, bins=10, alpha=0.5, color='#3498db', label=f'TTC (n={len(ttc_leads)})')
         print(f"  TTC lead times: mean={np.mean(ttc_leads):.2f}s, "
               f"median={np.median(ttc_leads):.2f}s")
     ax.set_xlabel('Lead time before failure (seconds)')
     ax.set_ylabel('Count')
-    ax.set_title('Lead-time distribution: temporal conflict vs TTC')
-    if div_leads or ttc_leads:
+    ax.set_title('Lead-time distribution: temporal conflict vs PCO vs TTC')
+    if div_leads or agreement_leads or pco_leads or ttc_leads:
         ax.legend()
     plt.tight_layout()
     fig.savefig(out_dir / 'task6_lead_time.png', dpi=150)
     plt.close(fig)
     print(f"  → Saved task6_lead_time.png")
 
-    return {'div_leads': div_leads, 'ttc_leads': ttc_leads}
+    return {'div_leads': div_leads, 'agreement_leads': agreement_leads, 'pco_leads': pco_leads, 'ttc_leads': ttc_leads}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -530,11 +628,11 @@ def task7_ablation(signals, labels, timesteps, out_dir):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_time_series(signals, labels, timesteps, out_dir, fps=20):
-    """Plot temporal conflict, TTC proxy/relative risk, distance proxy risk, and labels."""
+    """Plot temporal conflict, TTC, dist, PCO, and labels."""
     N = len(timesteps)
     t_axis = np.arange(N) / fps
 
-    fig, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
+    fig, axes = plt.subplots(5, 1, figsize=(14, 12), sharex=True)
 
     ax = axes[0]
     ax.plot(t_axis, signals['temporal_conflict_smooth'], color='#e74c3c', label='Conflict smooth')
@@ -555,6 +653,12 @@ def plot_time_series(signals, labels, timesteps, out_dir, fps=20):
     ax.legend(fontsize=8)
 
     ax = axes[3]
+    pco = signals.get('planner_conditioned_occupancy', np.full(N, np.nan))
+    ax.plot(t_axis, pco, color='#27ae60', linewidth=1.2, label='Planner-cond occupancy')
+    ax.set_ylabel('PCO')
+    ax.legend(fontsize=8)
+
+    ax = axes[4]
     ax.fill_between(t_axis, labels.astype(float), alpha=0.5, color='#e74c3c', label='failure label')
     ax.set_ylabel('Failure')
     ax.set_xlabel('Time (s)')
@@ -587,6 +691,7 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
 
     pre_frames = int(pre_window_s * fps)
     div = signals['temporal_conflict_smooth']
+    pco = signals.get('planner_conditioned_occupancy', np.full(len(div), np.nan))
     ttc_key = preferred_ttc_key(signals)
     ttc_risk = signals[ttc_key]
     dist_risk = signals['dist_proxy_risk']
@@ -606,10 +711,11 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
         return
 
     # Positive samples: max signal in pre-failure window
-    pos_div, pos_ttc, pos_dist = [], [], []
+    pos_div, pos_pco, pos_ttc, pos_dist = [], [], [], []
     for cs in collision_steps:
         start = max(0, cs - pre_frames)
         pos_div.append(finite_max(div[start:cs]))
+        pos_pco.append(finite_max(pco[start:cs]))
         pos_ttc.append(finite_max(ttc_risk[start:cs]))
         pos_dist.append(finite_max(dist_risk[start:cs]))
 
@@ -622,40 +728,46 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
     n_neg_balanced = min(len(pos_div), len(safe_candidates))  # balanced 1:1
     neg_idx_balanced = rng.choice(safe_candidates, n_neg_balanced, replace=False)
 
-    neg_div_bal, neg_ttc_bal, neg_dist_bal = [], [], []
+    neg_div_bal, neg_pco_bal, neg_ttc_bal, neg_dist_bal = [], [], [], []
     for i in neg_idx_balanced:
         neg_div_bal.append(finite_max(div[i-pre_frames:i]))
+        neg_pco_bal.append(finite_max(pco[i-pre_frames:i]))
         neg_ttc_bal.append(finite_max(ttc_risk[i-pre_frames:i]))
         neg_dist_bal.append(finite_max(dist_risk[i-pre_frames:i]))
 
     # Also collect natural-prevalence negatives (all safe windows)
-    neg_div_nat, neg_ttc_nat, neg_dist_nat = [], [], []
+    neg_div_nat, neg_pco_nat, neg_ttc_nat, neg_dist_nat = [], [], [], []
     for i in safe_candidates:
         neg_div_nat.append(finite_max(div[i-pre_frames:i]))
+        neg_pco_nat.append(finite_max(pco[i-pre_frames:i]))
         neg_ttc_nat.append(finite_max(ttc_risk[i-pre_frames:i]))
         neg_dist_nat.append(finite_max(dist_risk[i-pre_frames:i]))
 
     # Balanced evaluation (1:1)
     scores_div_bal  = np.array(pos_div  + neg_div_bal)
+    scores_pco_bal  = np.array(pos_pco  + neg_pco_bal)
     scores_ttc_bal  = np.array(pos_ttc  + neg_ttc_bal)
     scores_dist_bal = np.array(pos_dist + neg_dist_bal)
     ev_labels_bal   = np.array([1]*len(pos_div) + [0]*len(neg_div_bal), dtype=float)
 
     print(f"\n  Events: {len(pos_div)} positive, {len(neg_div_bal)} negative (balanced 1:1)")
-    for name, s in [('temporal_conflict', scores_div_bal), (ttc_key, scores_ttc_bal), ('dist_proxy_risk', scores_dist_bal)]:
+    for name, s in [('temporal_conflict', scores_div_bal), ('planner_cond_occ', scores_pco_bal),
+                     (ttc_key, scores_ttc_bal), ('dist_proxy_risk', scores_dist_bal)]:
         auroc = roc_auc(s, ev_labels_bal)
         auprc = pr_auc(s, ev_labels_bal)
         print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
 
     # Natural-prevalence evaluation (true base rate)
     scores_div_nat  = np.array(pos_div  + neg_div_nat)
+    scores_pco_nat  = np.array(pos_pco  + neg_pco_nat)
     scores_ttc_nat  = np.array(pos_ttc  + neg_ttc_nat)
     scores_dist_nat = np.array(pos_dist + neg_dist_nat)
     ev_labels_nat   = np.array([1]*len(pos_div) + [0]*len(neg_div_nat), dtype=float)
     prev = len(pos_div) / (len(pos_div) + len(neg_div_nat))
 
     print(f"\n  Events: {len(pos_div)} positive, {len(neg_div_nat)} negative (natural prevalence={prev:.3f})")
-    for name, s in [('temporal_conflict', scores_div_nat), (ttc_key, scores_ttc_nat), ('dist_proxy_risk', scores_dist_nat)]:
+    for name, s in [('temporal_conflict', scores_div_nat), ('planner_cond_occ', scores_pco_nat),
+                     (ttc_key, scores_ttc_nat), ('dist_proxy_risk', scores_dist_nat)]:
         auroc = roc_auc(s, ev_labels_nat)
         auprc = pr_auc(s, ev_labels_nat)
         print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
@@ -728,12 +840,15 @@ def main():
         k: [] for k in [
             'temporal_conflict_raw',
             'temporal_conflict_smooth',
+            'temporal_agreement_raw',
+            'temporal_agreement_smooth',
             'temporal_js_raw',
             'temporal_js_smooth',
             'temporal_valid_count',
             'divergence_raw',
             'divergence_smooth',
             'planner_spread',
+            'planner_conditioned_occupancy',
             'has_occupancy',
         ]
     }
@@ -752,14 +867,17 @@ def main():
         # Compute signals per-route so temporal smoothing doesn't cross boundaries
         div = compute_divergence_series(route_ts, use_occupancy=True, temporal_window=5)
         base = compute_baseline_series(route_ts)
+        pco, _ = planner_conditioned_occupancy(route_ts, blur_sigma=0.0)
         if all_base_signals is None:
             all_base_signals = {k: [] for k in base}
         for k in all_div_signals:
-            all_div_signals[k].append(div[k])
+            if k in div:
+                all_div_signals[k].append(div[k])
+        all_div_signals['planner_conditioned_occupancy'].append(pco)
         for k in all_base_signals:
             all_base_signals[k].append(base[k])
 
-        route_sig = {**div, **base}
+        route_sig = {**div, **base, 'planner_conditioned_occupancy': pco}
         per_route_signals.append(route_sig)
         if args.label == 'collision':
             per_route_labels.append(np.array([t['future_collision'] for t in route_ts], dtype=np.float64))
@@ -831,40 +949,48 @@ def main():
 
     # Per-route AUROC
     ttc_key = preferred_ttc_key(signals)
-    print(f"\n=== PER-ROUTE AUROC (temporal_conflict_smooth vs {ttc_key}) ===")
-    route_aurocs_div, route_aurocs_ttc = [], []
+    print(f"\n=== PER-ROUTE AUROC (temporal_conflict_smooth vs planner_cond_occ vs {ttc_key}) ===")
+    route_aurocs_div, route_aurocs_pco, route_aurocs_ttc = [], [], []
     for i, (rs, rl) in enumerate(zip(per_route_signals_occ, per_route_labels_occ)):
         a_div = roc_auc(rs['temporal_conflict_smooth'], rl)
+        a_pco = roc_auc(rs['planner_conditioned_occupancy'], rl)
         a_ttc = roc_auc(rs[ttc_key], rl)
         route_aurocs_div.append(a_div)
+        route_aurocs_pco.append(a_pco)
         route_aurocs_ttc.append(a_ttc)
-        print(f"  Route {i+1}: div={a_div:.3f}  ttc={a_ttc:.3f}")
+        print(f"  Route {i+1}: conflict={a_div:.3f}  pco={a_pco:.3f}  ttc={a_ttc:.3f}")
     if len(route_aurocs_div) > 1:
         valid_div = [x for x in route_aurocs_div if not np.isnan(x)]
+        valid_pco = [x for x in route_aurocs_pco if not np.isnan(x)]
         valid_ttc = [x for x in route_aurocs_ttc if not np.isnan(x)]
-        print(f"  Mean ± std  div={np.mean(valid_div):.3f}±{np.std(valid_div):.3f}  "
+        print(f"  Mean ± std  conflict={np.mean(valid_div):.3f}±{np.std(valid_div):.3f}  "
+              f"pco={np.mean(valid_pco):.3f}±{np.std(valid_pco):.3f}  "
               f"ttc={np.mean(valid_ttc):.3f}±{np.std(valid_ttc):.3f}")
 
     # Delta AUROC
-    print(f"\n=== DELTA AUROC: temporal_conflict_smooth − {ttc_key} ===")
-    delta_point = (roc_auc(signals_occ['temporal_conflict_smooth'], labels_occ) -
-                   roc_auc(signals_occ[ttc_key], labels_occ))
+    ttc_key = preferred_ttc_key(signals)
+    print(f"\n=== DELTA AUROC: temporal_conflict vs planner_cond_occ vs {ttc_key} ===")
     rng = np.random.default_rng(42)
     R = len(per_route_signals_occ)
-    delta_vals = []
-    for _ in range(500):
-        idx = rng.integers(0, R, R)
-        s_div = np.concatenate([per_route_signals_occ[i]['temporal_conflict_smooth'] for i in idx])
-        s_ttc = np.concatenate([per_route_signals_occ[i][ttc_key]              for i in idx])
-        l     = np.concatenate([per_route_labels_occ[i]                       for i in idx])
-        d = roc_auc(s_div, l) - roc_auc(s_ttc, l)
-        if not np.isnan(d):
-            delta_vals.append(d)
-    if delta_vals:
-        lo_d = np.percentile(delta_vals, 2.5)
-        hi_d = np.percentile(delta_vals, 97.5)
-        ci_type = "route-CI" if R >= 4 else "frame-CI"
-        print(f"  Δ AUROC = {delta_point:+.3f}  95% CI [{lo_d:+.3f}, {hi_d:+.3f}] [{ci_type}]")
+
+    for label, s_key in [('conflict', 'temporal_conflict_smooth'),
+                          ('pco', 'planner_conditioned_occupancy')]:
+        delta_point = (roc_auc(signals_occ[s_key], labels_occ) -
+                       roc_auc(signals_occ[ttc_key], labels_occ))
+        delta_vals = []
+        for _ in range(500):
+            idx = rng.integers(0, R, R)
+            s_candidate = np.concatenate([per_route_signals_occ[i][s_key] for i in idx])
+            s_ttc       = np.concatenate([per_route_signals_occ[i][ttc_key] for i in idx])
+            l           = np.concatenate([per_route_labels_occ[i] for i in idx])
+            d = roc_auc(s_candidate, l) - roc_auc(s_ttc, l)
+            if not np.isnan(d):
+                delta_vals.append(d)
+        if delta_vals:
+            lo_d = np.percentile(delta_vals, 2.5)
+            hi_d = np.percentile(delta_vals, 97.5)
+            ci_type = "route-CI" if R >= 4 else "frame-CI"
+            print(f"  {label}: Δ AUROC = {delta_point:+.3f}  95% CI [{lo_d:+.3f}, {hi_d:+.3f}] [{ci_type}]")
 
     print("\nPlotting time series...")
     plot_time_series(signals, labels, timesteps, out_dir)

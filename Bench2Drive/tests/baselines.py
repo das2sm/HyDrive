@@ -52,19 +52,6 @@ def _extract_float(timesteps, key, default=np.nan):
     )
 
 
-def _extract_first_float(timesteps, keys, default=np.nan):
-    values = []
-    for t in timesteps:
-        value = default
-        for key in keys:
-            candidate = _get_field(t, key, None)
-            if candidate is not None:
-                value = candidate
-                break
-        values.append(_as_float(value, default=default))
-    return np.array(values, dtype=np.float64)
-
-
 def _extract_optional_bool(timesteps, keys):
     values = []
     seen = False
@@ -170,17 +157,17 @@ def compute_baseline_series(
 
     ttc_proxy_raw = _extract_float(timesteps, "ttc")
     dist_proxy_raw = _extract_float(timesteps, "min_distance")
-    ttc_rel_raw = _extract_first_float(timesteps, ["ttc_rel", "ttc_rel_min"])
+    ttc_rel_raw = _extract_float(timesteps, "ttc_rel")
     speed = _extract_float(timesteps, "ego_speed")
 
     ttc_proxy_explicit = _extract_optional_bool(timesteps, ["ttc_valid"])
-    dist_proxy_explicit = _extract_optional_bool(timesteps, ["min_distance_valid", "dist_valid"])
-    ttc_rel_explicit = _extract_optional_bool(timesteps, ["ttc_rel_valid", "ttc_rel_min_valid"])
+    dist_proxy_explicit = _extract_optional_bool(timesteps, ["min_distance_valid"])
+    ttc_rel_explicit = _extract_optional_bool(timesteps, ["ttc_rel_valid"])
+    speed_valid = np.isfinite(speed) & (speed >= -5.0) & (speed <= MAX_REALISTIC_SPEED)
 
     occupancy_source = _extract_metadata_string(timesteps, "occupancy_source")
     source_invalid = np.isin(occupancy_source, INVALID_OCCUPANCY_SOURCES)
 
-    speed_valid = np.isfinite(speed) & (speed >= -5.0) & (speed <= MAX_REALISTIC_SPEED)
     ttc_proxy_valid = _infer_valid(ttc_proxy_raw, ttc_proxy_explicit, source_invalid) & speed_valid
     dist_proxy_valid = _infer_valid(dist_proxy_raw, dist_proxy_explicit, source_invalid)
     ttc_rel_valid = _infer_valid(ttc_rel_raw, ttc_rel_explicit, None)

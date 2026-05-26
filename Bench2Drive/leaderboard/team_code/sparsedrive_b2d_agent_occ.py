@@ -169,7 +169,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         self.visualizer = Visualizer(plot_choices, self.save_path, planning_key=cfg.get("anchor_reference_group", "spatial"))
         
         # ========== GUARDIAN INITIALIZATION ==========
-        self.use_guardian = True  # Toggle to enable/disable Guardian
+        self.use_guardian = False  # Toggle to enable/disable Guardian
         if self.use_guardian:
             self.guardian = Guardian(
                 world=None,  # Will be set in _init()

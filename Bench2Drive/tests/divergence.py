@@ -1,11 +1,5 @@
 """
-Temporal planner-world conflict measurement.
-
-The publication-facing predictive signal is temporal_conflict_score:
-weighted planner occupancy over the future horizon compared against matched
-future world occupancy slices. Raw Jensen-Shannon divergence is also returned
-for auditability, but collision risk is expected to rise when planner futures
-overlap world occupancy futures, i.e. when JS divergence is low.
+Divergence-based temporal conflict measurement.
 """
 
 import cv2
@@ -47,26 +41,22 @@ def _traj_to_bev_coords(trajs):
     return coords
 
 
-def _normalise_scores(planner_scores):
-    scores = np.asarray(planner_scores, dtype=np.float64).reshape(-1)
-    total = scores.sum()
-    if total > 1e-12:
-        return scores / total
-    return np.ones_like(scores, dtype=np.float64) / max(len(scores), 1)
-
-
-def _normalise_occupancy_grid(grid, blur_sigma=1.5):
+def _normalise_grid(grid):
     grid = np.asarray(grid, dtype=np.float64)
-    grid = np.clip(grid, 0.0, None)
     total = grid.sum()
     if total > 1e-12:
-        grid = grid / total
-    if blur_sigma > 0.1 and grid.max() > 1e-12:
-        grid = cv2.GaussianBlur(grid, (0, 0), blur_sigma)
-        total = grid.sum()
-        if total > 1e-12:
-            grid = grid / total
+        return grid / total
     return grid
+
+
+def _smooth_normalise(grid, blur_sigma=1.5):
+    grid = np.asarray(grid, dtype=np.float64)
+    grid = np.clip(grid, 0.0, None)
+    
+    if blur_sigma > 0.1:
+        grid = cv2.GaussianBlur(grid, (0, 0), blur_sigma)
+        
+    return _normalise_grid(grid)
 
 
 def _traj_pixel_yaw(traj_coords, idx):
@@ -95,8 +85,8 @@ def _add_footprint(grid, row, col, yaw, weight, sigma):
     This creates a proper probability distribution P_pi(x_t).
     """
     # Dimensions in pixels
-    half_l = VEHICLE_LENGTH_M / 2.0 / CELL_SIZE
-    half_w = VEHICLE_WIDTH_M / 2.0 / CELL_SIZE
+    half_l = (VEHICLE_LENGTH_M / 2.0 + VEHICLE_LONG_MARGIN_M) / CELL_SIZE
+    half_w = (VEHICLE_WIDTH_M / 2.0 + VEHICLE_LAT_MARGIN_M) / CELL_SIZE
 
     # Corners in [forward, left] relative to center
     corners_local = np.array([
@@ -107,7 +97,7 @@ def _add_footprint(grid, row, col, yaw, weight, sigma):
     ], dtype=np.float32)
 
     # Rotation matrix (yaw 0 is forward)
-    c, s = np.cos(yaw), np.sin(yaw)
+    c, s = np.cos(yaw), np.sin(yaw) 
     
     # BEV Coordinate Mapping:
     # Row decreases with forward motion. Col increases with left motion.
@@ -124,19 +114,9 @@ def _add_footprint(grid, row, col, yaw, weight, sigma):
 
     if sigma > 0.1:
         # Uncertainty is modeled as spatial blurring of the footprint
-        ksize = int(2 * np.ceil(2 * sigma) + 1)
-        if ksize % 2 == 0: ksize += 1
-        mask = cv2.GaussianBlur(mask, (ksize, ksize), sigma)
+        mask = cv2.GaussianBlur(mask, (0, 0), sigma)
 
     grid += weight * mask.astype(np.float64)
-
-
-def _normalise_grid(grid):
-    grid = np.asarray(grid, dtype=np.float64)
-    total = grid.sum()
-    if total > 1e-12:
-        return grid / total
-    return grid
 
 
 def rasterize_planner(planner_trajs, planner_scores, sigma_base=1.5, expansion_rate=0.4):
@@ -147,7 +127,6 @@ def rasterize_planner(planner_trajs, planner_scores, sigma_base=1.5, expansion_r
     planner_trajs = np.asarray(planner_trajs, dtype=np.float64)
     if planner_trajs.ndim == 2:
         planner_trajs = planner_trajs[None, ...]
-    planner_scores = _normalise_scores(planner_scores)
 
     probability_grid = np.zeros((GRID_H, GRID_W), dtype=np.float64)
     waypoint_coords = _traj_to_bev_coords(planner_trajs)  # (K, T, 2)
@@ -172,7 +151,6 @@ def rasterize_planner_temporal(planner_trajs, planner_scores, sigma_base=1.5, ex
     planner_trajs = np.asarray(planner_trajs, dtype=np.float64)
     if planner_trajs.ndim == 2:
         planner_trajs = planner_trajs[None, ...]
-    planner_scores = _normalise_scores(planner_scores)
 
     waypoint_coords = _traj_to_bev_coords(planner_trajs)
     num_waypoints = waypoint_coords.shape[1]
@@ -245,44 +223,6 @@ def planner_spread_entropy(planner_trajs, planner_scores):
     diffs = endpoints - mean  # (K, 2)
     weighted_var = np.average(np.sum(diffs**2, axis=1), weights=planner_scores)
     return float(weighted_var)
-
-
-def build_future_occupancy_windows(timesteps, num_waypoints=None, horizon_frames=None):
-    """
-    Offline helper for logs that do not already contain occupancy_future.
-
-    Returns an array with shape (N, T, H, W), where T matches planner waypoint
-    count. The last frames whose future window extends past the route end are
-    zero-filled and marked invalid in the returned validity mask.
-    """
-    if not timesteps:
-        return (
-            np.zeros((0, 0, GRID_H, GRID_W), dtype=np.float16),
-            np.zeros((0, 0), dtype=bool),
-            np.array([], dtype=np.int64),
-        )
-
-    if num_waypoints is None:
-        first_trajs = next((t.get('planner_trajs') for t in timesteps if 'planner_trajs' in t), None)
-        num_waypoints = int(np.asarray(first_trajs).shape[1]) if first_trajs is not None else TRAJ_WAYPOINTS
-    if horizon_frames is None:
-        horizon_frames = num_waypoints
-
-    offsets = np.rint(
-        np.linspace(horizon_frames / num_waypoints, horizon_frames, num_waypoints)
-    ).astype(np.int64)
-    occupancy_grids = [np.asarray(t['occupancy_grid'], dtype=np.float16) for t in timesteps]
-    windows = np.zeros((len(timesteps), num_waypoints, GRID_H, GRID_W), dtype=np.float16)
-    valid = np.zeros((len(timesteps), num_waypoints), dtype=bool)
-
-    for i in range(len(timesteps)):
-        for h, offset in enumerate(offsets):
-            j = i + int(offset)
-            if j < len(timesteps):
-                windows[i, h] = occupancy_grids[j]
-                valid[i, h] = True
-
-    return windows, valid, offsets
 
 
 def _align_occupancy_to_planner_bev(occ):
@@ -484,7 +424,7 @@ def compute_divergence_series(timesteps, use_occupancy=True, temporal_window=5):
                     continue
                 p_grid = planner_future[h]
                 q_grid = _align_occupancy_to_planner_bev(occupancy_future[h]).astype(np.float64)
-                q_grid = _normalise_occupancy_grid(q_grid)
+                q_grid = _smooth_normalise(q_grid)
 
                 js = js_divergence(p_grid, q_grid)
                 js_values.append(js)

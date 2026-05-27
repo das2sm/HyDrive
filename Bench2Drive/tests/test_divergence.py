@@ -12,14 +12,12 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from analysis.divergence import (
+from divergence import (
     _traj_to_bev_coords,
     rasterize_planner,
     js_divergence,
-    planner_spread_entropy,
     compute_divergence_series,
     _align_occupancy_to_planner_bev,
-    check_coordinate_alignment,
     GRID_H, GRID_W, GRID_RANGE, CELL_SIZE,
 )
 
@@ -91,25 +89,6 @@ def test_rasterize_normalization():
     total = grid.sum()
     print(f"  Grid sum = {total:.8f}")
     assert np.isclose(total, 1.0, rtol=1e-5), f"Grid sum={total}, expected 1.0"
-    print("  ✓ PASS")
-
-
-def test_planner_spread_entropy():
-    """Spreading trajectory endpoints should increase entropy."""
-    print("\n[TEST] Planner spread → entropy")
-    
-    # Concentrated endpoints
-    trajs_conc = np.array([[[0, 0]], [[0.1, 0.1]], [[0.05, 0.05]]])  # (K=3, T=1, 2)
-    scores = np.ones(3) / 3
-    spread_conc = planner_spread_entropy(trajs_conc, scores)
-    
-    # Spread endpoints
-    trajs_spread = np.array([[[5, 5]], [[-5, -5]], [[0, 10]]])  # (K=3, T=1, 2)
-    spread_spread = planner_spread_entropy(trajs_spread, scores)
-    
-    print(f"  Concentrated: spread = {spread_conc:.6f}")
-    print(f"  Spread:       spread = {spread_spread:.6f}")
-    assert spread_spread > spread_conc, f"Spread should be higher: {spread_spread} vs {spread_conc}"
     print("  ✓ PASS")
 
 
@@ -206,7 +185,6 @@ def main():
         test_js_divergence_symmetry,
         test_js_divergence_identical,
         test_rasterize_normalization,
-        test_planner_spread_entropy,
         test_compute_divergence_series,
         test_grid_bounds,
         test_coordinate_alignment,

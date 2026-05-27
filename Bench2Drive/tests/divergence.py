@@ -1,5 +1,5 @@
 """
-Divergence-based temporal conflict measurement.
+Divergence and Planner Conditioned Occupancy (PCO) metrics
 """
 
 import cv2
@@ -115,6 +115,13 @@ def _add_footprint(grid, row, col, yaw, weight, sigma):
     if sigma > 0.1:
         # Uncertainty is modeled as spatial blurring of the footprint
         mask = cv2.GaussianBlur(mask, (0, 0), sigma)
+        ''' Debug visualization of the footprint mask
+        import matplotlib.pyplot as plt
+        plt.imshow(mask, cmap='hot', interpolation='nearest')
+        plt.title(f"Footprint mask (weight={weight:.3f}, sigma={sigma:.2f})")
+        plt.colorbar()
+        plt.show()
+        '''
 
     grid += weight * mask.astype(np.float64)
 
@@ -122,7 +129,7 @@ def _add_footprint(grid, row, col, yaw, weight, sigma):
 def rasterize_planner(planner_trajs, planner_scores, sigma_base=1.5, expansion_rate=0.4):
     """
     Rasterize weighted planner trajectories onto a BEV probability grid.
-    Uses OBB footprints and growing temporal uncertainty.
+    Uses Oriented Bounding Box footprints and growing temporal uncertainty.
     """
     planner_trajs = np.asarray(planner_trajs, dtype=np.float64)
     if planner_trajs.ndim == 2:
@@ -211,20 +218,6 @@ def js_conflict_score(js_value):
     return float(np.clip(1.0 - js_value / JS_MAX, 0.0, 1.0))
 
 
-def planner_spread_entropy(planner_trajs, planner_scores):
-    """
-    Fallback divergence signal when occupancy is unavailable.
-    Measures weighted variance of trajectory endpoints.
-    """
-    if np.sum(planner_scores) < 1e-12:
-        return 0.0
-    endpoints = planner_trajs[:, -1, :]  # (K, 2)
-    mean = np.average(endpoints, weights=planner_scores, axis=0)
-    diffs = endpoints - mean  # (K, 2)
-    weighted_var = np.average(np.sum(diffs**2, axis=1), weights=planner_scores)
-    return float(weighted_var)
-
-
 def _align_occupancy_to_planner_bev(occ):
     """
     Align Guardian occupancy grid (row=right, col=forward) 
@@ -233,6 +226,8 @@ def _align_occupancy_to_planner_bev(occ):
     down-right to align the even-sized grid centers.
     Uses zero-fill instead of wrap to avoid ghost occupancy
     at the opposite edge.
+
+    Note: visualizing this reveals that the result mirrors the real world horizontally (left-right)
     """
     aligned = occ.T[::-1, ::-1]
     result = np.zeros_like(aligned)
@@ -240,36 +235,60 @@ def _align_occupancy_to_planner_bev(occ):
     return result
 
 
-def planner_conditioned_occupancy(timesteps, blur_sigma=0.0):
+def planner_conditioned_occupancy(timesteps, blur_sigma=0.0, causal=True):
     """
     Planner-conditioned occupancy risk score.
     
-    Instead of computing full-grid JS divergence, directly query the
-    aligned occupancy grid at each planner waypoint cell.  This isolates
-    "is there something where the planner expects to go?" from the
-    scene-wide occupancy statistics that dominate the full-grid JS.
+    Measures whether the ground-truth world currently has objects where the
+    planner intends to drive.  The occupancy grid (occupancy_grid) is
+    CARLA ground truth — every vehicle, walker, and static prop within 75m
+    rasterized onto a 120×120 grid in Guardian frame.  It is NOT the
+    planner's own obstacle prediction.
+    
+    PCO samples this ground-truth occupancy at the planner's trajectory
+    waypoints and averages over modes weighted by mode probability.
+    High PCO = the planner intends to go where objects currently are.
+    
+    Unlike full-grid JS divergence, this isolates the specific question
+    "is there something where the planner expects to go?" from scene-wide
+    occupancy statistics.
     
     For each timestep i:
       1. Convert K trajectory modes to BEV pixel coordinates.
-      2. For each waypoint h, align occupancy_future[h] to planner BEV.
-      3. Sample aligned occupancy at the (row, col) of each mode.
+      2. For each waypoint h, align occupancy to planner BEV.
+      3. For each mode k, sample aligned occupancy at the (row, col) of the corresponding BEV coordinate.
       4. Weight by mode probability and average over waypoints.
     
     Parameters
     ----------
     timesteps : list of dict
         Logger timesteps, each containing planner_trajs, planner_scores,
-        occupancy_grid, and optionally occupancy_future / occupancy_future_valid.
+        occupancy_grid (CARLA ground-truth world occupancy), and optionally
+        occupancy_future / occupancy_future_valid.
     blur_sigma : float, default 0.0
         Optional Gaussian blur applied to the aligned occupancy before
         sampling.  0.0 = no blur (raw binary).  0.5 = light spatial spread.
+    causal : bool, default True
+        If True: repeat current-frame ground-truth occupancy across all
+        waypoints.  This is the deployable predictor — it knows where
+        obstacles are right now but not where they will be.
+        If False: use ground-truth future occupancy (occupancy_future)
+        when available.  This is an oracle upper bound.
     
     Returns
     -------
     risk : np.ndarray, shape (N,)
-        Per-timestep planner-conditioned occupancy score: the expected
-        occupancy probability at the planner's predicted trajectory cells.
+        Per-timestep PCO score in [0, 1]: the expected ground-truth
+        occupancy intensity at the planner's predicted trajectory cells.
+        
+        Note: This is a fraction of planner belief mass intersecting occupancy,
+        not a calibrated collision probability. Typical collision-window
+        values are 0.2–0.5 (only later waypoints overlap the obstacle,
+        and not all modes fire simultaneously). Safe values are <0.05.
+        AUROC is invariant to scale, so the low dynamic range does not
+        affect discriminative power.
         NaN for steps with missing planner data or no valid occupancy.
+    
     has_valid : np.ndarray, shape (N,), bool
         True for steps where the computation was valid.
     """
@@ -285,33 +304,31 @@ def planner_conditioned_occupancy(timesteps, blur_sigma=0.0):
         if trajs is None or scores is None or len(trajs) == 0:
             continue
 
-        # Normalise scores to a probability distribution over modes
-        scores = np.asarray(scores, dtype=np.float64).ravel()
+        scores = np.asarray(scores, dtype=np.float64)
         s_total = scores.sum()
         if s_total < 1e-12:
-            scores = np.ones_like(scores) / max(len(scores), 1)
-        else:
-            scores = scores / s_total
+            continue
 
         K, T, _ = trajs.shape
-        bev = _traj_to_bev_coords(trajs)          # (K, T, 2) — (row, col)
+        bev = _traj_to_bev_coords(trajs)          # (K, T, 2) —> (row, col)
 
-        # Occupancy future slices
-        if 'occupancy_future' in t:
-            occ_future = np.asarray(t['occupancy_future'])
-            occ_valid = np.asarray(
-                t.get('occupancy_future_valid',
-                      np.ones(len(occ_future), dtype=bool)),
-                dtype=bool,
-            )
+        if causal:
+            # Limitation: tiles current occupancy across all waypoints, so PCO
+            # only catches obstacles already overlapping the planner's cells.
+            # Dynamic obstacles not yet in collision path are invisible until
+            # they enter the occupied region — this is the oracle gap.
+            occ_future = np.tile(np.asarray(occ_current)[None, ...], (T, 1, 1))
+            occ_valid = np.ones(T, dtype=bool)
         else:
-            occ_future = np.asarray(occ_current)[None, ...]
-            occ_valid = np.array([True], dtype=bool)
-
+            # Oracle version with future occupancy
+            occ_future = np.asarray(t['occupancy_future'])
+            occ_valid = np.asarray(t['occupancy_future_valid'])
+           
         h_max = min(T, len(occ_future))
         total_risk = 0.0
         n_valid = 0
 
+        # For each WAYPOINT -> 0 to T-1
         for h in range(h_max):
             if not occ_valid[h]:
                 continue
@@ -321,13 +338,16 @@ def planner_conditioned_occupancy(timesteps, blur_sigma=0.0):
             if blur_sigma > 0.0 and aligned.max() > 1e-12:
                 aligned = cv2.GaussianBlur(aligned, (0, 0), blur_sigma)
 
-            # Sample occupancy at each mode's (row, col) for this waypoint
             mode_vals = np.zeros(K, dtype=np.float64)
+
+            # For each MODE -> 0 to K-1
             for k in range(K):
                 r = int(round(bev[k, h, 0]))
                 c = int(round(bev[k, h, 1]))
-                r = int(np.clip(r, 0, GRID_H - 1))
-                c = int(np.clip(c, 0, GRID_W - 1))
+
+                # Taking r, c from the planner's bev coordinates
+                # And sampling the aligned occupancy at that location
+                # from the ground-truth occupancy grid.
                 mode_vals[k] = aligned[r, c]
 
             total_risk += float(np.sum(scores * mode_vals))
@@ -340,128 +360,92 @@ def planner_conditioned_occupancy(timesteps, blur_sigma=0.0):
     return risk, has_valid
 
 
-def check_coordinate_alignment(planner_trajs, planner_scores, ego_forward_m=10.0):
-    """
-    Sanity check: place a synthetic obstacle directly ahead and verify that
-    the planner grid and aligned occupancy grid both peak in the same region.
-    """
-    res = GRID_RANGE * 2 / GRID_H 
-    origin = GRID_H // 2
-    
-    # Guardian Frame: row=right, col=forward
-    ahead_col = int(ego_forward_m / res + origin)
-    ahead_row = origin
-
-    synthetic_occ = np.zeros((GRID_H, GRID_W), dtype=np.float32)
-    synthetic_occ[ahead_row, ahead_col] = 1.0
-
-    # Align to planner BEV
-    occ_aligned = _align_occupancy_to_planner_bev(synthetic_occ)
-    occ_peak = np.unravel_index(occ_aligned.argmax(), occ_aligned.shape)
-
-    # Planner grid peak
-    p_grid = rasterize_planner(planner_trajs, planner_scores)
-    planner_peak = np.unravel_index(p_grid.argmax(), p_grid.shape)
-
-    expected_row = int((GRID_RANGE - ego_forward_m) / res)  
-    expected_col = origin  
-
-    row_diff = abs(int(occ_peak[0]) - expected_row)
-    col_diff = abs(int(occ_peak[1]) - expected_col)
-
-    return {
-        'occ_peak_aligned': occ_peak,
-        'expected': (expected_row, expected_col),
-        'row_diff': row_diff,
-        'col_diff': col_diff,
-        'aligned': row_diff <= 2 and col_diff <= 2,
-    }
-
-
 def compute_divergence_series(timesteps, use_occupancy=True, temporal_window=5):
     """
-    Compute temporal planner-world conflict and raw JS divergence for all steps.
+    Legacy full-grid JS divergence between planner rasterization and world occupancy.
 
-    The predictive score is temporal_conflict_raw/smooth. Raw JS divergence is
-    returned separately as temporal_js_raw/smooth.
+    This is the confounded global JS metric — NOT the primary PCO metric.
+    Retained only for ablation comparisons.
+
+    For each timestep, rasters the K planner modes into per-waypoint occupancy
+    distributions (planner_future) and computes Jensen-Shannon divergence against
+    the aligned world occupancy grid.  The per-waypoint scores are averaged,
+    then smoothed with a causal rolling mean over temporal_window frames.
+
+    Uses occupancy_future (ground-truth future slices) — still a confounded
+    metric even with oracle information (AUROC 0.610, scene-density limited).
+
+    Parameters
+    ----------
+    timesteps : list of dict
+        Logger timesteps, each containing planner_trajs, planner_scores,
+        occupancy_future / occupancy_future_valid.
+    use_occupancy : bool, default True
+        If False, skip all occupancy-based computation (all-NaN output).
+    temporal_window : int, default 5
+        Causal rolling mean window for smoothing.
+
+    Returns
+    -------
+    dict with keys:
+        temporal_conflict_raw     — per-step raw conflict score (mean JS per waypoint)
+        temporal_conflict_smooth  — causal rolling mean of conflict_raw
+        temporal_valid_count      — number of valid waypoint slices averaged
+        divergence_raw            — alias for temporal_conflict_raw
+        divergence_smooth         — alias for temporal_conflict_smooth
+        has_occupancy             — bool array, True where occupancy was available
     """
     N = len(timesteps)
     temporal_conflict_raw = np.full(N, np.nan)
-    temporal_js_raw = np.full(N, np.nan)
     temporal_valid_count = np.zeros(N, dtype=np.int64)
-    planner_spread = np.zeros(N)
     has_occupancy = np.zeros(N, dtype=bool)
 
     for i, t in enumerate(timesteps):
         trajs = t['planner_trajs']    
         scores = t['planner_scores']  
-        occ_current = t['occupancy_grid']
+        occ_future = np.asarray(t['occupancy_future'])
+        occ_valid = np.asarray(t['occupancy_future_valid'], dtype=bool)
 
-        spread = planner_spread_entropy(trajs, scores)
-        planner_spread[i] = spread
-
-        if 'occupancy_future' in t:
-            occupancy_future = np.asarray(t['occupancy_future'])
-            occupancy_valid = np.asarray(
-                t.get('occupancy_future_valid', np.ones(len(occupancy_future), dtype=bool)),
-                dtype=bool,
-            )
-        else:
-            occupancy_future = np.asarray(occ_current)[None, ...]
-            occupancy_valid = np.array([True], dtype=bool)
-
-        occ_has_signal = np.array([occ.max() > 1e-6 for occ in occupancy_future], dtype=bool)
-        valid_slices = occupancy_valid & occ_has_signal
+        occ_has_signal = np.array([occ.max() > 1e-6 for occ in occ_future], dtype=bool)
+        valid_slices = occ_valid & occ_has_signal
         has_occupancy[i] = valid_slices.any()
 
         if use_occupancy and valid_slices.any():
             planner_future = rasterize_planner_temporal(trajs, scores)
-            num_slices = min(len(planner_future), len(occupancy_future))
-            js_values = []
+            num_slices = min(len(planner_future), len(occ_future))
             conflict_values = []
             for h in range(num_slices):
                 if not valid_slices[h]:
                     continue
                 p_grid = planner_future[h]
-                q_grid = _align_occupancy_to_planner_bev(occupancy_future[h]).astype(np.float64)
+                q_grid = _align_occupancy_to_planner_bev(occ_future[h]).astype(np.float64)
                 q_grid = _smooth_normalise(q_grid)
 
                 js = js_divergence(p_grid, q_grid)
-                js_values.append(js)
                 conflict_values.append(js_conflict_score(js))
 
-            temporal_valid_count[i] = len(js_values)
-            if js_values:
-                temporal_js_raw[i] = float(np.mean(js_values))
+            temporal_valid_count[i] = len(conflict_values)
+            if conflict_values:
                 temporal_conflict_raw[i] = float(np.mean(conflict_values))
 
     # Causal rolling mean
     temporal_conflict_smooth = np.full(N, np.nan)
-    temporal_js_smooth = np.full(N, np.nan)
     for i in range(N):
+        start = max(0, i - temporal_window + 1)
+
         if not np.isfinite(temporal_conflict_raw[i]):
             continue
-        start = max(0, i - temporal_window + 1)
+
         conflict_window = temporal_conflict_raw[start:i+1]
         conflict_valid = np.isfinite(conflict_window)
         if conflict_valid.any():
             temporal_conflict_smooth[i] = conflict_window[conflict_valid].mean()
-        js_window = temporal_js_raw[start:i+1]
-        js_valid = np.isfinite(js_window)
-        if js_valid.any():
-            temporal_js_smooth[i] = js_window[js_valid].mean()
 
     return {
         'temporal_conflict_raw': temporal_conflict_raw,
         'temporal_conflict_smooth': temporal_conflict_smooth,
-        'temporal_agreement_raw': 1.0 - temporal_conflict_raw,
-        'temporal_agreement_smooth': 1.0 - temporal_conflict_smooth,
-        'temporal_js_raw': temporal_js_raw,
-        'temporal_js_smooth': temporal_js_smooth,
         'temporal_valid_count': temporal_valid_count,
-        # Backward-compatible aliases used by existing analysis code.
         'divergence_raw': temporal_conflict_raw,
         'divergence_smooth': temporal_conflict_smooth,
-        'planner_spread': planner_spread,
         'has_occupancy': has_occupancy,
     }

@@ -31,7 +31,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from divergence import (
     compute_divergence_series,
-    planner_spread_entropy,
     rasterize_planner,
     rasterize_planner_temporal,
     js_divergence,
@@ -165,9 +164,6 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
     candidates = {
         'temporal_conflict_smooth': signals['temporal_conflict_smooth'],
         'temporal_conflict_raw':    signals['temporal_conflict_raw'],
-        'temporal_agreement_smooth': signals['temporal_agreement_smooth'],
-        'temporal_agreement_raw':    signals['temporal_agreement_raw'],
-        'planner_spread':           signals['planner_spread'],
         'planner_conditioned_occupancy': signals['planner_conditioned_occupancy'],
     }
     for name in available_keys(signals, BASELINE_SCORE_KEYS):
@@ -401,7 +397,6 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
     print("="*60)
 
     div = signals['temporal_conflict_smooth']
-    agreement = signals['temporal_agreement_smooth']
     pco = signals.get('planner_conditioned_occupancy', np.full(len(div), np.nan))
     ttc_raw_key = 'ttc_rel_raw' if 'ttc_rel_risk' in signals and np.isfinite(signals['ttc_rel_risk']).any() else 'ttc_proxy_raw'
     ttc_raw = signals[ttc_raw_key]
@@ -412,10 +407,8 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
         return {'div_leads': [], 'pco_leads': [], 'ttc_leads': []}
 
     div_thresh = float(div_threshold)
-    agreement_thresh = 1.0 - div_thresh
     pco_thresh = float(pco_threshold)
     print(f"  Temporal conflict threshold: {div_thresh:.4f}")
-    print(f"  Planner-occupancy agreement threshold: {agreement_thresh:.4f}")
     print(f"  Planner-conditioned occupancy threshold: {pco_thresh:.4f}")
     print(f"  TTC threshold: {ttc_threshold:.1f}s ({ttc_raw_key})")
 
@@ -432,7 +425,6 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
     print(f"  Actual collision frames: {len(collision_steps)}")
 
     div_leads = []
-    agreement_leads = []
     pco_leads = []
     ttc_leads = []
 
@@ -449,17 +441,6 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
         if div_trigger is not None:
             div_lead = (collision_step - div_trigger) / fps
             div_leads.append(div_lead)
-
-        # Planner-occupancy agreement: inverse of conflict (high = dangerous)
-        agreement_trigger = None
-        agreement_lead = None
-        for j in range(search_start, collision_step - sustain + 1):
-            if np.all(agreement[j:j+sustain] > agreement_thresh):
-                agreement_trigger = j
-                break
-        if agreement_trigger is not None:
-            agreement_lead = (collision_step - agreement_trigger) / fps
-            agreement_leads.append(agreement_lead)
 
         # Planner-conditioned occupancy: obstacle at planner's trajectory cell
         pco_trigger = None
@@ -486,10 +467,9 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
             ttc_leads.append(ttc_lead)
 
         div_str = f"{div_lead:.2f}s" if div_lead is not None else "None"
-        agr_str = f"{agreement_lead:.2f}s" if agreement_lead is not None else "None"
         pco_str = f"{pco_lead:.2f}s" if pco_lead is not None else "None"
         ttc_str = f"{ttc_lead:.2f}s" if ttc_lead is not None else "None"
-        print(f"  Collision at step {collision_step}: conflict={div_str}, agreement={agr_str}, pco={pco_str}, ttc={ttc_str}")
+        print(f"  Collision at step {collision_step}: conflict={div_str}, pco={pco_str}, ttc={ttc_str}")
 
     # Plot
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -497,10 +477,6 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
         ax.hist(div_leads, bins=10, alpha=0.5, color='#e74c3c', label=f'Conflict (n={len(div_leads)})')
         print(f"  Conflict lead times: mean={np.mean(div_leads):.2f}s, "
               f"median={np.median(div_leads):.2f}s")
-    if agreement_leads:
-        ax.hist(agreement_leads, bins=10, alpha=0.5, color='#e67e22', label=f'Agreement (n={len(agreement_leads)})')
-        print(f"  Agreement lead times: mean={np.mean(agreement_leads):.2f}s, "
-              f"median={np.median(agreement_leads):.2f}s")
     if pco_leads:
         ax.hist(pco_leads, bins=10, alpha=0.5, color='#2ecc71', label=f'PCO (n={len(pco_leads)})')
         print(f"  PCO lead times: mean={np.mean(pco_leads):.2f}s, "
@@ -512,14 +488,14 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
     ax.set_xlabel('Lead time before failure (seconds)')
     ax.set_ylabel('Count')
     ax.set_title('Lead-time distribution: temporal conflict vs PCO vs TTC')
-    if div_leads or agreement_leads or pco_leads or ttc_leads:
+    if div_leads or pco_leads or ttc_leads:
         ax.legend()
     plt.tight_layout()
     fig.savefig(out_dir / 'task6_lead_time.png', dpi=150)
     plt.close(fig)
     print(f"  → Saved task6_lead_time.png")
 
-    return {'div_leads': div_leads, 'agreement_leads': agreement_leads, 'pco_leads': pco_leads, 'ttc_leads': ttc_leads}
+    return {'div_leads': div_leads, 'pco_leads': pco_leads, 'ttc_leads': ttc_leads}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -840,15 +816,12 @@ def main():
         k: [] for k in [
             'temporal_conflict_raw',
             'temporal_conflict_smooth',
-            'temporal_agreement_raw',
-            'temporal_agreement_smooth',
-            'temporal_js_raw',
-            'temporal_js_smooth',
+
             'temporal_valid_count',
             'divergence_raw',
             'divergence_smooth',
-            'planner_spread',
             'planner_conditioned_occupancy',
+            'pco_oracle',
             'has_occupancy',
         ]
     }
@@ -867,17 +840,19 @@ def main():
         # Compute signals per-route so temporal smoothing doesn't cross boundaries
         div = compute_divergence_series(route_ts, use_occupancy=True, temporal_window=5)
         base = compute_baseline_series(route_ts)
-        pco, _ = planner_conditioned_occupancy(route_ts, blur_sigma=0.0)
+        pco, _ = planner_conditioned_occupancy(route_ts, blur_sigma=0.0, causal=True)
+        pco_oracle, _ = planner_conditioned_occupancy(route_ts, blur_sigma=0.0, causal=False)
         if all_base_signals is None:
             all_base_signals = {k: [] for k in base}
         for k in all_div_signals:
             if k in div:
                 all_div_signals[k].append(div[k])
         all_div_signals['planner_conditioned_occupancy'].append(pco)
+        all_div_signals['pco_oracle'].append(pco_oracle)
         for k in all_base_signals:
             all_base_signals[k].append(base[k])
 
-        route_sig = {**div, **base, 'planner_conditioned_occupancy': pco}
+        route_sig = {**div, **base, 'planner_conditioned_occupancy': pco, 'pco_oracle': pco_oracle}
         per_route_signals.append(route_sig)
         if args.label == 'collision':
             per_route_labels.append(np.array([t['future_collision'] for t in route_ts], dtype=np.float64))

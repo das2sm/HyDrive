@@ -89,6 +89,13 @@ class DivergenceLogger:
                      ttc_rel_distance=None,      # float or None
                      ttc_rel_closing_speed=None, # float or None
                      ttc_rel_actor_type='none',  # str
+                     gc_score=None,       # float or None — General Criticality
+                     gc_overlap_term=None,  # float or None
+                     gc_potential_term=None,  # float or None
+                     gc_decel_term=None,  # float or None
+                     gc_ttc_term=None,    # float or None
+                     collision_cls=None,  # float or None — learned collision score
+                     point_collision_cls=None,  # array or None — per-waypoint collision
                      collision=False,    # bool
                      near_miss=False,    # bool
                      metadata=None):     # dict
@@ -139,6 +146,18 @@ class DivergenceLogger:
             'ttc_rel_distance': clean_float(ttc_rel_distance),
             'ttc_rel_closing_speed': clean_float(ttc_rel_closing_speed),
             'ttc_rel_actor_type': str(ttc_rel_actor_type),
+            
+            # Guardian General Criticality
+            'gc_score': clean_float(gc_score),
+            'gc_overlap_term': clean_float(gc_overlap_term),
+            'gc_potential_term': clean_float(gc_potential_term),
+            'gc_decel_term': clean_float(gc_decel_term),
+            'gc_ttc_term': clean_float(gc_ttc_term),
+            
+            # Learned collision prediction (SparseDrive planner)
+            'collision_cls': clean_float(collision_cls),
+            'point_collision_cls': np.asarray(point_collision_cls, dtype=np.float32) if point_collision_cls is not None else np.array([np.nan], dtype=np.float32),
+            'point_collision_cls_mean': float(np.mean(point_collision_cls)) if point_collision_cls is not None else np.nan,
             
             # Outcome labels
             'collision': collision,

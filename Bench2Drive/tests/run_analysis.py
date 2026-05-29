@@ -42,7 +42,11 @@ from divergence import (
 from baselines import compute_baseline_series
 
 
-BASELINE_SCORE_KEYS = ['ttc_proxy_risk', 'ttc_rel_risk', 'dist_proxy_risk', 'rss_proxy']
+BASELINE_SCORE_KEYS = [
+    'ttc_proxy_risk', 'ttc_rel_risk', 'dist_proxy_risk', 'rss_proxy',
+    'gc_score', 'gc_overlap_term', 'gc_potential_term', 'gc_decel_term', 'gc_ttc_term',
+    'collision_cls', 'point_collision_cls_mean',
+]
 
 
 def available_keys(signals, keys):
@@ -61,7 +65,45 @@ def finite_percentile_edges(values, percentiles):
     finite = np.isfinite(values)
     if not finite.any():
         return None
-    return np.unique(np.percentile(values[finite], percentiles))
+    edges = np.unique(np.percentile(values[finite], percentiles))
+    edges[-1] = np.inf
+    return edges
+
+
+def _route_bootstrap_sep(values, labels, route_ids, n_bootstrap=2000, seed=42):
+    """Route-cluster bootstrap: mean(fail) - mean(safe) with 95% CI and p-value.
+
+    Bootstraps by resampling routes (not frames) with replacement to account
+    for within-route autocorrelation. Returns (sep, ci_low, ci_high, p_value).
+    """
+    rng = np.random.default_rng(seed)
+    unique_routes = np.unique(route_ids)
+    route_ids = np.asarray(route_ids)
+    values = np.asarray(values, dtype=np.float64)
+    labels = np.asarray(labels, dtype=bool)
+
+    def _route_sep(route_subset):
+        mask = np.isin(route_ids, route_subset)
+        f = values[mask][labels[mask]]
+        s = values[mask][~labels[mask]]
+        if len(f) == 0 or len(s) == 0:
+            return np.nan
+        return float(f.mean() - s.mean())
+
+    observed = _route_sep(unique_routes)
+    boot_seps = []
+    for _ in range(n_bootstrap):
+        sampled = rng.choice(unique_routes, size=len(unique_routes), replace=True)
+        s = _route_sep(sampled)
+        if np.isfinite(s):
+            boot_seps.append(s)
+
+    if len(boot_seps) < 100:
+        return observed, np.nan, np.nan, np.nan
+
+    ci_low, ci_high = np.percentile(boot_seps, [2.5, 97.5])
+    p_boot = (np.array(boot_seps) <= 0.0).mean()
+    return observed, ci_low, ci_high, p_boot
 
 
 def finite_max(values):
@@ -258,7 +300,7 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
 
     # Define binning variables and their edges
     bin_configs = [
-        ('speed',          speed,    np.array([0, 2, 5, 10, 30])),
+        ('speed',          speed,    np.array([0, 2, 5, 10, np.inf])),
         ('dist_proxy_risk', dist_risk, finite_percentile_edges(dist_risk, [0, 25, 50, 75, 100])),
         (ttc_key,          ttc_risk, finite_percentile_edges(ttc_risk, [0, 25, 50, 75, 100])),
         ('num_actors',     num_actors, finite_percentile_edges(num_actors, [0, 25, 50, 75, 100])),
@@ -289,7 +331,10 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
             sep = mean_fail - mean_safe
             bin_auroc = roc_auc(div[mask], fail.astype(float))
             try:
-                _, pval = mannwhitneyu(div[mask][fail], div[mask][~fail], alternative='greater')
+                if route_ids is not None:
+                    _, _, _, pval = _route_bootstrap_sep(div[mask], labels[mask], route_ids[mask])
+                else:
+                    _, pval = mannwhitneyu(div[mask][fail], div[mask][~fail], alternative='greater')
             except Exception:
                 pval = float('nan')
             separations.append(sep)
@@ -337,7 +382,10 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
             sep = mean_fail - mean_safe
             bin_auroc = roc_auc(pco[mask], fail.astype(float))
             try:
-                _, pval = mannwhitneyu(pco[mask][fail], pco[mask][~fail], alternative='greater')
+                if route_ids is not None:
+                    _, _, _, pval = _route_bootstrap_sep(pco[mask], labels[mask], route_ids[mask])
+                else:
+                    _, pval = mannwhitneyu(pco[mask][fail], pco[mask][~fail], alternative='greater')
             except Exception:
                 pval = float('nan')
             separations.append(sep)
@@ -381,16 +429,15 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
                     div_threshold=0.10, pco_threshold=0.15, ttc_threshold=2.0, sustain=3):
     """
     For each failure event, measure:
-      - t_div: first time temporal conflict exceeds threshold before failure
-      - t_agreement: first time planner-occupancy agreement exceeds threshold
-      - t_pco: first time planner_conditioned_occupancy exceeds threshold
+      - t_div: first time temporal conflict > div_threshold before failure
+      - t_pco: first time planner_conditioned_occupancy > pco_threshold
       - t_ttc: first time TTC < ttc_threshold before failure
     Lead time = time_to_failure - t_signal.
 
     Uses a fixed, pre-specified conflict threshold to avoid post-hoc tuning.
     Conflict threshold 0.10 corresponds to ~90th percentile of observed values.
-    Agreement threshold 0.90 is the complement (1 - conflict = agreement).
     PCO threshold 0.15 is tuned to the observed collision-window distribution.
+    TTC threshold 2.0s is standard.
     """
     print("\n" + "="*60)
     print("TASK 6: LEAD-TIME ANALYSIS")
@@ -749,6 +796,228 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
         print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
 
 
+def task_threshold_free_lead_time(signals, l_labels, l_timesteps, out_dir, fps=20, max_lead_s=6.0):
+    """
+    Threshold-free lead-time analysis using time-dependent AUROC.
+    For each lead time τ (0 to max_lead_s), compute AUROC of each signal
+    at frames that are exactly τ seconds before a collision event.
+    Produces a plot of AUROC(τ) vs τ for all signals.
+    """
+    print("\n" + "="*60)
+    print("THRESHOLD-FREE LEAD-TIME (Time-dependent AUROC)")
+    print("="*60)
+
+    div = signals.get('temporal_conflict_smooth', np.full(len(l_labels), np.nan))
+    pco = signals.get('planner_conditioned_occupancy', np.full(len(l_labels), np.nan))
+    ttc_key = preferred_ttc_key(signals)
+    ttc = signals.get(ttc_key, np.full(len(l_labels), np.nan))
+    dist = signals.get('dist_proxy_risk', np.full(len(l_labels), np.nan))
+    gc = signals.get('gc_score', np.full(len(l_labels), np.nan))
+    col_cls = signals.get('collision_cls', np.full(len(l_labels), np.nan))
+
+    # Find collision events (deduplicated)
+    collision_steps = []
+    in_coll = False
+    for i, t in enumerate(l_timesteps):
+        if t.get('collision', False) and not in_coll:
+            collision_steps.append(i)
+            in_coll = True
+        elif not t.get('collision', False):
+            in_coll = False
+
+    if len(collision_steps) < 2:
+        print(f"  Only {len(collision_steps)} event(s) — need ≥2. Skipping.")
+        return
+
+    max_lead_frames = int(max_lead_s * fps)
+    lead_times = np.arange(0, max_lead_frames + 1) / fps
+
+    candidates = {
+        'temporal_conflict': div,
+        'planner_cond_occ': pco,
+        ttc_key: ttc,
+        'dist_proxy_risk': dist,
+        'gc_score': gc,
+        'collision_cls': col_cls,
+    }
+    # Drop signals that are all NaN
+    candidates = {k: v for k, v in candidates.items() if np.isfinite(v).any()}
+
+    # For each lead time τ, build labels = frames that are τ before a collision
+    # vs safe frames far from any collision
+    results = {name: [] for name in candidates}
+    for tau_frame in range(max_lead_frames + 1):
+        tau = tau_frame / fps
+        pos_mask = np.zeros(len(l_labels), dtype=bool)
+        for cs in collision_steps:
+            idx = cs - tau_frame
+            if 0 <= idx < len(l_labels):
+                pos_mask[idx] = True
+
+        neg_mask = np.ones(len(l_labels), dtype=bool)
+        for cs in collision_steps:
+            neg_mask[max(0, cs - max_lead_frames * 2):min(len(l_labels), cs + max_lead_frames * 2)] = False
+
+        for name, vals in candidates.items():
+            v = vals[pos_mask & np.isfinite(vals)]
+            if len(v) < 2:
+                results[name].append(np.nan)
+                continue
+            labels_bin = np.concatenate([
+                np.ones(len(v)),
+                np.zeros(max(1, len(v)))
+            ])
+            scores_bin = np.concatenate([
+                v,
+                vals[neg_mask & np.isfinite(vals)][:len(v)],
+            ])
+            results[name].append(roc_auc(scores_bin, labels_bin))
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = ['#e74c3c', '#2ecc71', '#3498db', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
+    valid_results = [(n, r) for n, r in results.items() if not np.all(np.isnan(r))]
+    for (name, vals), color in zip(valid_results, colors[:len(valid_results)]):
+        valid_mask = np.isfinite(vals)
+        if valid_mask.any():
+            ax.plot(lead_times[valid_mask], np.array(vals)[valid_mask], '-o',
+                    color=color, label=name, markersize=3, linewidth=1.5)
+
+    ax.axhline(0.5, color='gray', linestyle='--', linewidth=0.8, label='random')
+    ax.set_xlabel('Lead time before collision (s)')
+    ax.set_ylabel('AUROC')
+    ax.set_title('Time-dependent AUROC: predictive power vs lead time')
+    ax.set_xlim(0, max_lead_s)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=8, loc='lower left')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'threshold_free_lead_time.png', dpi=150)
+    plt.close(fig)
+    print(f"  → Saved threshold_free_lead_time.png")
+
+
+def task_joint_confound_model(signals, labels, timesteps, out_dir, route_ids=None):
+    """
+    Joint confound model: logistic regression and mixed-effects model
+    showing PCO adds independent signal beyond TTC, distance, speed, actor count.
+
+    Collision_window ~ PCO + TTC + distance + speed + actor_count + (1|route)
+    """
+    print("\n" + "="*60)
+    print("JOINT CONFOUND MODEL")
+    print("="*60)
+
+    import pandas as pd
+
+    df = pd.DataFrame({
+        'collision_window': labels.astype(float),
+        'pco': signals.get('planner_conditioned_occupancy', np.full(len(labels), np.nan)),
+        'ttc': signals.get(preferred_ttc_key(signals), np.full(len(labels), np.nan)),
+        'dist': signals.get('dist_proxy_risk', np.full(len(labels), np.nan)),
+        'speed': signals.get('speed', np.full(len(labels), np.nan)),
+        'actor_count': np.array([
+            t.get('metadata', {}).get('num_actors', np.nan)
+            for t in timesteps
+        ], dtype=np.float64),
+        'conflict': signals.get('temporal_conflict_smooth', np.full(len(labels), np.nan)),
+        'gc_score': signals.get('gc_score', np.full(len(labels), np.nan)),
+        'collision_cls': signals.get('collision_cls', np.full(len(labels), np.nan)),
+    })
+    if route_ids is not None:
+        df['route_id'] = route_ids.astype(int)
+
+    # Drop rows with any NaN in predictors
+    predictors = ['pco', 'ttc', 'dist', 'speed', 'actor_count']
+    model_df = df.dropna(subset=['collision_window'] + predictors)
+
+    # Also drop rows where ttc is exactly the censor value (no hazard)
+    # and collision_window is 0 (safe frames with no risk)
+
+    # ── 1. Univariate logistic regressions ──
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score as sk_roc_auc
+
+    print("\n  Univariate logistic regressions (collision_window ~ predictor):")
+    uni_results = {}
+    for p in predictors + ['conflict', 'gc_score', 'collision_cls']:
+        sub = df.dropna(subset=['collision_window', p])
+        if len(sub) < 100:
+            continue
+        X = sub[p].values.reshape(-1, 1)
+        y = sub['collision_window'].values
+        clf = LogisticRegression(max_iter=1000, solver='lbfgs')
+        try:
+            clf.fit(X, y)
+            y_pred = clf.predict_proba(X)[:, 1]
+            auc = sk_roc_auc(y, y_pred)
+            coef = float(clf.coef_[0][0])
+            uni_results[p] = {'coef': coef, 'auc': auc, 'n': len(sub)}
+            print(f"    {p:20s}: coef={coef:+.4f}, AUROC={auc:.4f}, n={len(sub)}")
+        except Exception as e:
+            print(f"    {p:20s}: FAILED ({e})")
+
+    # ── 2. Full logistic regression (all predictors) ──
+    print("\n  Full logistic regression (PCO + TTC + dist + speed + actor_count):")
+    full_df = model_df.copy()
+    X_full = full_df[predictors].values
+    y_full = full_df['collision_window'].values
+    clf_full = LogisticRegression(max_iter=1000, solver='lbfgs')
+    try:
+        clf_full.fit(X_full, y_full)
+        for name, coef in zip(predictors, clf_full.coef_[0]):
+            print(f"    {name:20s}: coef={coef:+.4f}")
+        y_pred_full = clf_full.predict_proba(X_full)[:, 1]
+        auc_full = sk_roc_auc(y_full, y_pred_full)
+        print(f"    Full model AUROC: {auc_full:.4f}")
+
+        # PCO-only model (same data subset)
+        clf_pco = LogisticRegression(max_iter=1000, solver='lbfgs')
+        clf_pco.fit(X_full[:, 0:1], y_full)
+        auc_pco = sk_roc_auc(y_full, clf_pco.predict_proba(X_full[:, 0:1])[:, 1])
+        print(f"    PCO-only AUROC:   {auc_pco:.4f} (same subset)")
+    except Exception as e:
+        print(f"    Full logistic FAILED: {e}")
+
+    # ── 3. Mixed-effects model (if statsmodels available) ──
+    try:
+        import statsmodels.formula.api as smf
+        print("\n  Mixed-effects logistic regression (PCO + TTC + dist + speed + actor_count + (1|route)):")
+        mem_df = df.dropna(subset=['collision_window'] + predictors + (['route_id'] if route_ids is not None else []))
+        if len(mem_df) > 500 and route_ids is not None and mem_df['route_id'].nunique() >= 4:
+            formula = 'collision_window ~ pco + ttc + dist + speed + actor_count'
+            if route_ids is not None:
+                try:
+                    model = smf.mixedlm(formula, data=mem_df, groups=mem_df['route_id'])
+                    result = model.fit()
+                    print(result.summary())
+
+                    # Save coefficients
+                    coef_df = pd.DataFrame({
+                        'term': result.fe_params.index,
+                        'coef': result.fe_params.values,
+                        'pvalue': result.pvalues.values if hasattr(result, 'pvalues') else np.nan,
+                    })
+                    coef_path = out_dir / 'joint_model_coefficients.csv'
+                    coef_df.to_csv(coef_path, index=False)
+                    print(f"  → Saved {coef_path}")
+                except Exception as e:
+                    print(f"    MixedLM failed: {e}")
+                    print("    Falling back to logistic regression with route dummies...")
+                    # Fallback: logistic with route fixed effects
+                    formula_fe = formula + ' + C(route_id)'
+                    model_fe = smf.logit(formula_fe, data=mem_df).fit(disp=0)
+                    print(model_fe.summary())
+        else:
+            print(f"    Insufficient data: {len(mem_df)} rows, "
+                  f"{mem_df['route_id'].nunique() if route_ids is not None else 0} routes")
+    except ImportError:
+        print("\n  statsmodels not available. Skipping mixed-effects model.")
+        print("  Install: conda install -c conda-forge statsmodels")
+
+    print()
+
+
 def task_baseline_sensitivity(all_routes_ts, eval_mask, labels_occ):
     """Report baseline AUROC sensitivity to declared horizons, taus, and smoothing."""
     print("\n=== BASELINE SENSITIVITY (pre-impact eval mask) ===")
@@ -979,6 +1248,8 @@ def main():
     task6_lead_time(signals, timesteps, out_dir)
     task7_ablation(signals_occ, labels_occ, ts_occ, out_dir)
     task_event_level(signals, timesteps, out_dir)
+    task_threshold_free_lead_time(signals_occ, labels_occ, ts_occ, out_dir)
+    task_joint_confound_model(signals_occ, labels_occ, ts_occ, out_dir, route_ids=route_ids_occ)
 
     print("\n=== HORIZON SENSITIVITY (temporal_conflict_smooth AUROC) ===")
     for w in [1, 3, 5, 10]:

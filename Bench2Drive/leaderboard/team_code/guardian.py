@@ -91,6 +91,11 @@ class Guardian:
         self.latest_ttc_rel_valid = False
         self.latest_ttc_rel_distance = np.nan
         self.latest_ttc_rel_closing_speed = np.nan
+        self.latest_gc_score = np.nan
+        self.latest_gc_overlap_term = np.nan
+        self.latest_gc_potential_term = np.nan
+        self.latest_gc_decel_term = np.nan
+        self.latest_gc_ttc_term = np.nan
         self.latest_ttc_rel_actor_type = 'none'
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -813,6 +818,11 @@ class Guardian:
         self.latest_ttc_rel_distance = actor_ttc['distance']
         self.latest_ttc_rel_closing_speed = actor_ttc['closing_speed']
         self.latest_ttc_rel_actor_type = actor_ttc['actor_type']
+        self.latest_gc_score = Gc
+        self.latest_gc_overlap_term = gc_terms['gc_overlap_term']
+        self.latest_gc_potential_term = gc_terms['gc_potential_term']
+        self.latest_gc_decel_term = gc_terms['gc_decel_term']
+        self.latest_gc_ttc_term = gc_terms['gc_ttc_term']
 
         return False, 0.0   # never intervene
     

@@ -1,21 +1,26 @@
 #!/bin/bash
 # run_all_routes.sh
-# Run ALL available routes in the fail2drive_split directory.
+# Run routes that have collisions (from collision_routes.txt).
 # Skips routes that already have a processed .pkl file.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
-F2D_SPLIT="/home/ace428/Soham/HyDrive/Bench2Drive/Fail2Drive/fail2drive_split"
 PROCESSED_DIR="$ROOT/processed"
+COLLISION_LIST="$ROOT/tests/collision_routes.txt"
 
 mkdir -p "$PROCESSED_DIR"
 
-# Discover all route names from XML files
-mapfile -t ALL_ROUTES < <(ls "$F2D_SPLIT"/*.xml | xargs -n 1 basename | sed 's/.xml//' | sort)
+if [ ! -f "$COLLISION_LIST" ]; then
+    echo "ERROR: Collision route list not found at $COLLISION_LIST"
+    exit 1
+fi
 
-echo "Discovered ${#ALL_ROUTES[@]} total routes."
+# Read collision route names (skip comment lines and blanks)
+mapfile -t ALL_ROUTES < <(grep -v '^\s*#' "$COLLISION_LIST" | grep -v '^\s*$')
+
+echo "Discovered ${#ALL_ROUTES[@]} collision routes to re-simulate."
 
 FAILED=()
 SKIPPED=0

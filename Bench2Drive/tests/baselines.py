@@ -151,6 +151,8 @@ def compute_baseline_series(
         keys = [
             "ttc_proxy_raw", "ttc_rel_raw",
             "ttc_proxy_risk", "ttc_rel_risk", "dist_proxy_risk", "rss_proxy",
+            "gc_score", "gc_overlap_term", "gc_potential_term", "gc_decel_term", "gc_ttc_term",
+            "collision_cls", "point_collision_cls_mean",
             "speed",
         ]
         return {k: np.array([], dtype=np.float64) for k in keys}
@@ -164,6 +166,17 @@ def compute_baseline_series(
     dist_proxy_explicit = _extract_optional_bool(timesteps, ["min_distance_valid"])
     ttc_rel_explicit = _extract_optional_bool(timesteps, ["ttc_rel_valid"])
     speed_valid = np.isfinite(speed) & (speed >= -5.0) & (speed <= MAX_REALISTIC_SPEED)
+
+    # Guardian General Criticality
+    gc_score = _extract_float(timesteps, "gc_score")
+    gc_overlap_term = _extract_float(timesteps, "gc_overlap_term")
+    gc_potential_term = _extract_float(timesteps, "gc_potential_term")
+    gc_decel_term = _extract_float(timesteps, "gc_decel_term")
+    gc_ttc_term = _extract_float(timesteps, "gc_ttc_term")
+
+    # Learned collision prediction
+    collision_cls = _extract_float(timesteps, "collision_cls")
+    point_collision_cls_mean = _extract_float(timesteps, "point_collision_cls_mean")
 
     occupancy_source = _extract_metadata_string(timesteps, "occupancy_source")
     source_invalid = np.isin(occupancy_source, INVALID_OCCUPANCY_SOURCES)
@@ -210,5 +223,12 @@ def compute_baseline_series(
         "dist_proxy_risk": dist_proxy_risk,
         "ttc_rel_risk": ttc_rel_risk,
         "rss_proxy": rss_proxy,
+        "gc_score": gc_score,
+        "gc_overlap_term": gc_overlap_term,
+        "gc_potential_term": gc_potential_term,
+        "gc_decel_term": gc_decel_term,
+        "gc_ttc_term": gc_ttc_term,
+        "collision_cls": collision_cls,
+        "point_collision_cls_mean": point_collision_cls_mean,
         "speed": speed,
     }

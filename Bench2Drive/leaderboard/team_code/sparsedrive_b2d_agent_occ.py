@@ -169,7 +169,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         self.visualizer = Visualizer(plot_choices, self.save_path, planning_key=cfg.get("anchor_reference_group", "spatial"))
         
         # ========== GUARDIAN INITIALIZATION ==========
-        self.use_guardian = False  # Toggle to enable/disable Guardian
+        self.use_guardian = True  # Toggle to enable/disable Guardian
         if self.use_guardian:
             self.guardian = Guardian(
                 world=None,  # Will be set in _init()
@@ -190,7 +190,7 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         print("[SparseDrive] Divergence logger initialized")
         # =======================================
 
-        self.collision_sensor = None  # Will be initialized in _init() when we have access to the world and ego actor   
+        self.collision_sensor = None  # Will be initialized in _init() when we have access to the world and ego actor
         self.collision_latched = False
         self.near_miss_cooldown = 0 
    
@@ -601,6 +601,22 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
             planner_trajs = planner_trajs.detach().cpu().numpy()  # (6, 6, 2)
             planner_scores = planner_scores.detach().cpu().numpy()  # (6,)
 
+            # Extract learned collision prediction from planner
+            if 'collision_cls' in output:
+                collision_cls_val = output['collision_cls'].detach().cpu().numpy()
+                # collision_cls is per-trajectory: (K,) mean across modes or per-mode value
+                if collision_cls_val.ndim >= 2:
+                    collision_cls_val = collision_cls_val.reshape(-1)
+                collision_cls = float(np.mean(collision_cls_val))
+            else:
+                collision_cls = None
+            point_collision_cls = None
+            if 'point_collision_cls' in output:
+                pcc = output['point_collision_cls']
+                if torch.is_tensor(pcc):
+                    pcc = pcc.detach().cpu().numpy()
+                point_collision_cls = np.asarray(pcc, dtype=np.float32)
+
             assert planner_trajs.shape == (K, 6, 2), f"Wrong shape: {planner_trajs.shape}"
 
             '''
@@ -665,6 +681,13 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 ttc_rel_closing_speed = getattr(self.guardian, 'latest_ttc_rel_closing_speed', np.nan)
                 ttc_rel_actor_type = getattr(self.guardian, 'latest_ttc_rel_actor_type', 'none')
 
+                # Pull gc_score from Guardian
+                gc_score = getattr(self.guardian, 'latest_gc_score', np.nan)
+                gc_overlap_term = getattr(self.guardian, 'latest_gc_overlap_term', np.nan)
+                gc_potential_term = getattr(self.guardian, 'latest_gc_potential_term', np.nan)
+                gc_decel_term = getattr(self.guardian, 'latest_gc_decel_term', np.nan)
+                gc_ttc_term = getattr(self.guardian, 'latest_gc_ttc_term', np.nan)
+
                 # Disable intervention unless explicitly enabled
                 if not self.use_guardian:
                     guardian_intervene = False
@@ -685,6 +708,11 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
             min_dist = np.nan
             ttc = np.nan
             occ_meta = {'source': 'none', 'actor_count': 0}
+            gc_score = np.nan
+            gc_overlap_term = np.nan
+            gc_potential_term = np.nan
+            gc_decel_term = np.nan
+            gc_ttc_term = np.nan
         
         # ========== DETECT COLLISION/NEAR-MISS ==========
         collision_occurred = False
@@ -719,7 +747,6 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 f"speed={ego_speed:.2f}m/s"
             )
 
-        # ========== LOG DIVERGENCE DATA ==========
         if planner_trajs is not None and planner_scores is not None:
             self.divergence_logger.log_timestep(
                 planner_trajs=planner_trajs,      # (K, T, 2) - multiple trajectory modes
@@ -736,6 +763,13 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 ttc_rel_distance=ttc_rel_distance,
                 ttc_rel_closing_speed=ttc_rel_closing_speed,
                 ttc_rel_actor_type=ttc_rel_actor_type,
+                gc_score=gc_score,
+                gc_overlap_term=gc_overlap_term,
+                gc_potential_term=gc_potential_term,
+                gc_decel_term=gc_decel_term,
+                gc_ttc_term=gc_ttc_term,
+                collision_cls=collision_cls,
+                point_collision_cls=point_collision_cls,
                 collision=collision_occurred,              # bool
                 near_miss=near_miss,              # bool
                 metadata={

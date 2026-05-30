@@ -44,7 +44,7 @@ from baselines import compute_baseline_series
 
 BASELINE_SCORE_KEYS = [
     'ttc_proxy_risk', 'ttc_rel_risk', 'dist_proxy_risk', 'rss_proxy',
-    'gc_score', 'gc_overlap_term', 'gc_potential_term', 'gc_decel_term', 'gc_ttc_term',
+    'gc_score', 'gc_overlap_term', 'gc_potential_term',
     'collision_cls', 'point_collision_cls_mean',
 ]
 
@@ -326,17 +326,25 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
             fail = labels[mask].astype(bool)
             if fail.sum() == 0 or (~fail).sum() == 0:
                 continue
-            mean_fail = div[mask][fail].mean()
-            mean_safe = div[mask][~fail].mean()
+            fail_vals = div[mask][fail]
+            safe_vals = div[mask][~fail]
+            mean_fail = np.nanmean(fail_vals)
+            mean_safe = np.nanmean(safe_vals)
             sep = mean_fail - mean_safe
             bin_auroc = roc_auc(div[mask], fail.astype(float))
-            try:
-                if route_ids is not None:
-                    _, _, _, pval = _route_bootstrap_sep(div[mask], labels[mask], route_ids[mask])
-                else:
-                    _, pval = mannwhitneyu(div[mask][fail], div[mask][~fail], alternative='greater')
-            except Exception:
+            # Check for constant arrays: Mann-Whitney fails on all-identical values
+            fail_finite = fail_vals[np.isfinite(fail_vals)]
+            safe_finite = safe_vals[np.isfinite(safe_vals)]
+            if len(np.unique(fail_finite)) < 2 or len(np.unique(safe_finite)) < 2:
                 pval = float('nan')
+            else:
+                try:
+                    if route_ids is not None:
+                        _, _, _, pval = _route_bootstrap_sep(div[mask], labels[mask], route_ids[mask])
+                    else:
+                        _, pval = mannwhitneyu(fail_finite, safe_finite, alternative='greater')
+                except Exception:
+                    pval = float('nan')
             separations.append(sep)
             bin_labels.append(f'[{lo:.2f},{hi:.2f})\nn={mask.sum()}')
             sig = '*' if pval < 0.05 else ''
@@ -377,17 +385,25 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
             fail = labels[mask].astype(bool)
             if fail.sum() == 0 or (~fail).sum() == 0:
                 continue
-            mean_fail = pco[mask][fail].mean()
-            mean_safe = pco[mask][~fail].mean()
+            fail_vals = pco[mask][fail]
+            safe_vals = pco[mask][~fail]
+            mean_fail = np.nanmean(fail_vals)
+            mean_safe = np.nanmean(safe_vals)
             sep = mean_fail - mean_safe
             bin_auroc = roc_auc(pco[mask], fail.astype(float))
-            try:
-                if route_ids is not None:
-                    _, _, _, pval = _route_bootstrap_sep(pco[mask], labels[mask], route_ids[mask])
-                else:
-                    _, pval = mannwhitneyu(pco[mask][fail], pco[mask][~fail], alternative='greater')
-            except Exception:
+            # Check for constant arrays: Mann-Whitney fails on all-identical values
+            fail_finite = fail_vals[np.isfinite(fail_vals)]
+            safe_finite = safe_vals[np.isfinite(safe_vals)]
+            if len(np.unique(fail_finite)) < 2 or len(np.unique(safe_finite)) < 2:
                 pval = float('nan')
+            else:
+                try:
+                    if route_ids is not None:
+                        _, _, _, pval = _route_bootstrap_sep(pco[mask], labels[mask], route_ids[mask])
+                    else:
+                        _, pval = mannwhitneyu(fail_finite, safe_finite, alternative='greater')
+                except Exception:
+                    pval = float('nan')
             separations.append(sep)
             bin_labels.append(f'[{lo:.2f},{hi:.2f})\nn={mask.sum()}')
             sig = '*' if pval < 0.05 else ''
@@ -796,7 +812,9 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
         print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
 
 
-def task_threshold_free_lead_time(signals, l_labels, l_timesteps, out_dir, fps=20, max_lead_s=6.0):
+def task_threshold_free_lead_time(signals, l_labels, out_dir, full_timesteps=None,
+                                   eval_mask=None, collision_mask_full=None,
+                                   fps=20, max_lead_s=6.0):
     """
     Threshold-free lead-time analysis using time-dependent AUROC.
     For each lead time τ (0 to max_lead_s), compute AUROC of each signal
@@ -815,14 +833,24 @@ def task_threshold_free_lead_time(signals, l_labels, l_timesteps, out_dir, fps=2
     gc = signals.get('gc_score', np.full(len(l_labels), np.nan))
     col_cls = signals.get('collision_cls', np.full(len(l_labels), np.nan))
 
-    # Find collision events (deduplicated)
+    # Find collision events from full (unfiltered) timesteps
+    if collision_mask_full is not None:
+        full_collision_mask = np.asarray(collision_mask_full, dtype=bool)
+    elif full_timesteps is not None:
+        full_collision_mask = np.array([t.get('collision', False) for t in full_timesteps], dtype=bool)
+    else:
+        # Try to find collision field in the data dict (fallback for backward compat)
+        print("  WARNING: no full_timesteps or collision_mask_full provided. "
+              "Looking for 'collision' in signals...")
+        full_collision_mask = signals.get('collision', np.zeros(len(l_labels), dtype=bool))
+
     collision_steps = []
     in_coll = False
-    for i, t in enumerate(l_timesteps):
-        if t.get('collision', False) and not in_coll:
+    for i, c in enumerate(full_collision_mask):
+        if c and not in_coll:
             collision_steps.append(i)
             in_coll = True
-        elif not t.get('collision', False):
+        elif not c:
             in_coll = False
 
     if len(collision_steps) < 2:
@@ -843,6 +871,16 @@ def task_threshold_free_lead_time(signals, l_labels, l_timesteps, out_dir, fps=2
     # Drop signals that are all NaN
     candidates = {k: v for k, v in candidates.items() if np.isfinite(v).any()}
 
+    # Build original→filtered index mapping
+    if eval_mask is not None:
+        cum_eval = np.cumsum(eval_mask)
+        orig_to_filtered = np.full(len(eval_mask), -1, dtype=int)
+        orig_to_filtered[eval_mask] = np.arange(eval_mask.sum())
+    else:
+        # Assume signals/labels already aligned with full data
+        orig_to_filtered = np.arange(len(l_labels))
+        eval_mask = np.ones(len(l_labels), dtype=bool)
+
     # For each lead time τ, build labels = frames that are τ before a collision
     # vs safe frames far from any collision
     results = {name: [] for name in candidates}
@@ -850,13 +888,20 @@ def task_threshold_free_lead_time(signals, l_labels, l_timesteps, out_dir, fps=2
         tau = tau_frame / fps
         pos_mask = np.zeros(len(l_labels), dtype=bool)
         for cs in collision_steps:
-            idx = cs - tau_frame
-            if 0 <= idx < len(l_labels):
-                pos_mask[idx] = True
+            idx_orig = cs - tau_frame
+            if 0 <= idx_orig < len(orig_to_filtered):
+                idx_filt = orig_to_filtered[idx_orig]
+                if idx_filt >= 0:
+                    pos_mask[idx_filt] = True
 
         neg_mask = np.ones(len(l_labels), dtype=bool)
         for cs in collision_steps:
-            neg_mask[max(0, cs - max_lead_frames * 2):min(len(l_labels), cs + max_lead_frames * 2)] = False
+            lo = max(0, cs - max_lead_frames * 2)
+            hi = min(len(orig_to_filtered), cs + max_lead_frames * 2)
+            for idx_orig in range(lo, hi):
+                idx_filt = orig_to_filtered[idx_orig]
+                if idx_filt >= 0:
+                    neg_mask[idx_filt] = False
 
         for name, vals in candidates.items():
             v = vals[pos_mask & np.isfinite(vals)]
@@ -1248,7 +1293,10 @@ def main():
     task6_lead_time(signals, timesteps, out_dir)
     task7_ablation(signals_occ, labels_occ, ts_occ, out_dir)
     task_event_level(signals, timesteps, out_dir)
-    task_threshold_free_lead_time(signals_occ, labels_occ, ts_occ, out_dir)
+    task_threshold_free_lead_time(signals_occ, labels_occ, out_dir,
+                                     full_timesteps=timesteps,
+                                     eval_mask=eval_mask,
+                                     collision_mask_full=collision_mask)
     task_joint_confound_model(signals_occ, labels_occ, ts_occ, out_dir, route_ids=route_ids_occ)
 
     print("\n=== HORIZON SENSITIVITY (temporal_conflict_smooth AUROC) ===")

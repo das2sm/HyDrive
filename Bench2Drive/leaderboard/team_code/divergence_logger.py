@@ -170,6 +170,13 @@ class DivergenceLogger:
         self.timesteps.append(entry)
         self.step += 1
     
+    def truncate_and_save(self, route_name, max_steps):
+        """Save only up to max_steps, truncating post-collision garbage frames."""
+        was = len(self.timesteps)
+        self.timesteps = self.timesteps[:max_steps]
+        self.save_route(route_name)
+        print(f"[DivergenceLogger] Truncated {was} → {len(self.timesteps)} timesteps")
+
     def save_route(self, route_name):
         """Save all logged data for this route."""
         output_file = self.log_dir / f"{route_name}.pkl"
@@ -190,9 +197,9 @@ class DivergenceLogger:
 
         summary = {
             'route_name': route_name,
-            'total_steps': len(self.timesteps),
-            'collisions': sum(t['collision'] for t in self.timesteps),
-            'near_misses': sum(t['near_miss'] for t in self.timesteps)
+            'total_steps': int(len(self.timesteps)),
+            'collisions': int(sum(t['collision'] for t in self.timesteps)),
+            'near_misses': int(sum(t['near_miss'] for t in self.timesteps))
         }
         summary_file = self.log_dir / f"{route_name}_summary.json"
         with open(summary_file, 'w') as f:

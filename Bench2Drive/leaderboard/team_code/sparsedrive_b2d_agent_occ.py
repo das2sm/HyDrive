@@ -192,7 +192,8 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
 
         self.collision_sensor = None  # Will be initialized in _init() when we have access to the world and ego actor
         self.collision_latched = False
-        self.near_miss_cooldown = 0 
+        self.near_miss_cooldown = 0
+        self._stuck_counter = None
    
         self.lidar2cam = {
         'CAM_FRONT':np.array([[ 1.  ,  0.  ,  0.  ,  0.  ],
@@ -837,6 +838,24 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 timestamp=timestamp,
                 throttle_cmd=control.throttle
             )
+        
+        # ========== STUCK-VEHICLE DETECTION ==========
+        # After a collision, if the ego vehicle stays at near-zero velocity for
+        # >100 timesteps (~5s), flush the divergence log and end the route early.
+        # This prevents the scenario runner from logging 4000+ useless zero-velocity
+        # frames while waiting for the route timeout.
+        if self.collision_latched:
+            if ego_speed < 0.1:
+                if self._stuck_counter is None:
+                    self._stuck_counter = 0
+                self._stuck_counter += 1
+                if self._stuck_counter > 100:
+                    route_name = f"route_{self.save_name}"
+                    print(f"[Stuck] Collision + zero velocity for >5s. Saving log ({self.step} steps) and ending route.")
+                    self.divergence_logger.truncate_and_save(route_name, self.step)
+                    raise RuntimeError("Vehicle stuck after collision, ending route")
+            else:
+                self._stuck_counter = None
         
         '''
         # TIMING: Diagnostic (log slow frames)

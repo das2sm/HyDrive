@@ -2,18 +2,18 @@
 
 ## What this is
 
-Research project: does temporal divergence between planner futures and world occupancy futures predict sparse-planner failures better than TTC/RSS/distance?
+Research project: does planner-conditioned occupancy (PCO) predict sparse-planner failures better than TTC/distance/other baselines (documented below)?
 
 ## Code layout
 
-Code lives in `Bench2Drive/` (a SparseDriveV2 fork with Guardian + divergence logging). The root `README.md` is a 3-month research roadmap, not a dev guide. README.md month 3 is not the focus right now. The goal is to find publishable results.
+Code lives in `Bench2Drive/` (a Bench2Drive (B2D) fork with SparseDriveV2 code B2D specifically, and Guardian + divergence logging). The root `README.md` is a 3-month research roadmap (some of it is outdated - the project began with testing planner-world JS divergence but pivoted to PCO as JS divergence was shown to not add anything meaningful), not a dev guide. README.md month 3 is not the focus right now. The goal is to find publishable results.
 
 ## Key structural facts
 
 - **No standard tooling**: no ruff, mypy, pytest, pre-commit, CI, or lockfiles. Tests are plain-Python scripts run directly.
 - **`requirement.txt`** (not `requirements.txt`) at `Bench2Drive/` — easy to miss. Uses `mmcv-full==1.7.1`, `mmdet==2.28.2`.
 - **Conda environment** named `sparsedrive` is used in scripts (`conda run -n sparsedrive python ...`).
-- **`tests/`** is analysis, not just tests. Contains the core divergence computation (`divergence.py`), baselines, and the main analysis runner (`run_analysis.py`).
+- **`tests/`** is analysis, not just tests. Contains the core divergence and PCO computation (`divergence.py`), baselines, and the main analysis runner (`run_analysis.py`).
 - **`tests/test_divergence.py`** runs as `python tests/test_divergence.py` — no test runner needed.
 - **`scripts/debug_b2d.sh`** is the main simulation runner (not just for debugging).
 - **Agent entry point**: each agent file exports `get_entry_point()` returning the class name.
@@ -38,7 +38,7 @@ Example: `projects/configs/sparsedrive_stage2.py+ckpt/sparsedrive_small_b2d_stag
 | Planner BEV | row=forward (inverted), col=left |
 | Guardian/CARLA | row=right, col=forward |
 
-Alignment is (`_align_occupancy_to_planner_bev` in `tests/divergence.py`). The 1px roll corrects the even-grid center mismatch. The VAD agent's Guardian also has `_vad_traj_to_carla_local` that swaps `[left, forward]` to `[forward, -left]`.
+Alignment is (`_align_occupancy_to_planner_bev` in `tests/divergence.py`). The VAD agent's Guardian also has `_vad_traj_to_carla_local` that swaps `[left, forward]` to `[forward, -left]`.
 
 ## BEV grid
 
@@ -50,13 +50,13 @@ Alignment is (`_align_occupancy_to_planner_bev` in `tests/divergence.py`). The 1
 |------|------|
 | `sparsedrive_b2d_agent.py` | Base SparseDrive without Guardian |
 | `sparsedrive_b2d_agent_occ.py` | SparseDrive + Guardian + DivergenceLogger + CollisionSensor |
-| `vad_f2d_agent_occ.py` | VAD variant with its own inlined Guardian (different grid: 240×240, 0.4m/cell) - NOT USED FOR THIS RESEARCH - ignore|
+| `vad_f2d_agent_occ.py` | VAD variant with its own inlined Guardian (different grid: 240×240, 0.4m/cell) - nothing wired in yet - future work|
 
 ## Guardian performance
 
 - Actor list refreshed every frame (`_actor_list_cache_max_age=1`). Occupancy recomputed every step (`expensive_step_interval=1`).
 - `skip_cri` and `skip_path_blockage` are `True` by default (expensive features disabled for research logging).
-- Intervention is disabled (`intervene = False`).
+- Intervention is disabled (`intervene = False`) - this is month 3 work which is not the focus right now.
 
 ## Postprocessing labels
 
@@ -80,7 +80,7 @@ The `near_miss` label (in agent) is defined using Guardian's `min_dist` and `ttc
 
 Must be set: `CARLA_ROOT`, `IS_BENCH2DRIVE=True`, `PYTHONPATH` including `leaderboard/` and `scenario_runner/`.
 
-## Evidence summary (120 routes, 40 collisions)
+## Evidence summary (Fail2Drive routes - 120 routes, 40 collisions - plan to add more routes in the future)
 
 ### Global JS divergence `temporal_conflict_smooth` — confounded
 
@@ -90,6 +90,7 @@ Full-grid JS between planner occupancy rasterization and Guardian occupancy is d
 
 `planner_conditioned_occupancy()` in `tests/divergence.py` directly samples the aligned occupancy grid at each planner trajectory waypoint cell, weighted by mode probability. This eliminates the occupancy-density confound because it only looks at cells the planner intends to occupy.
 
+Preliminary testing results - still verifying if valid:
 | Metric | PCO | dist_proxy | ttc_rel | JS conflict |
 |--------|-----|------------|---------|-------------|
 | AUROC | **0.702** | 0.629 | 0.607 | 0.610 |
@@ -122,7 +123,7 @@ Independent verification confirmed all results:
 | Pre-collision enrichment | PCO top-10% catches 27.2% of pre-collision frames; TTC catches 11.8% |
 | Per-route PCO wins | 19/40 routes where PCO AUROC > TTC AUROC (TTC wins 21/40) |
 
-**Verdict**: The result is real. PCO provides independent, complementary collision-prediction signal orthogonal to TTC.
+Still in verification process if PCO is meaningful.
 
 ## Modality ablation
 
@@ -132,7 +133,7 @@ Independent verification confirmed all results:
 | Full multimodal PCO (causal) | 0.685 | **+0.037 sig** | Mode-weighted occupancy sampling |
 | Oracle PCO (future occ) | 0.705 | +0.020 (over causal) | Uses ground-truth future occupancy |
 
-The +0.037 gain from full multimodal weighting is significant (95% CI [+0.031, +0.042]). This means the planner's uncertainty structure contributes real predictive value beyond deterministic path-occupancy overlap. The contribution is modest but material — it separates PCO from "differentiable collision checking."
+**UPDATE**: Verified on 39 routes (32 events) — ablation is flat (AUROC 0.654 for both multimodal and top-1). Investigation confirms SparseDriveV2 trajectories are essentially evenly scored across modes (`traj_cls` outputs near-uniform). The planner does not express meaningful uncertainty through its mode scores. This means the "uncertainty structure" framing is invalid for this planner. Frame PCO as mode-unweighted occupancy-at-waypoints, not as uncertainty-weighted divergence. The multi-modal path in the code is retained only for potential use with planners that have calibrated mode scores.
 
 ## Simulated peer-review notes / desk-reject risks
 
@@ -144,7 +145,7 @@ The result is promising but should be framed tightly. The publishable claim is *
 
 - Make **causal PCO** the primary metric. Treat oracle/future-occupancy PCO as an upper-bound ablation, not a deployable runtime result.
 - Be explicit that PCO is a mode-weighted occupancy-at-planner-waypoints score. If using the word "divergence", define it carefully and acknowledge that full-grid JS failed.
-- Do **not** claim "better than RSS" unless real `carla.ad.rss` is wired in. Current `rss_proxy` is a heuristic TTC+distance threshold and should be called **RSS-style proxy**.
+- Do **not** claim "better than RSS" unless real `carla.ad.rss` is wired in (this was tried but didn't work - may need to compile CARLA from scratch with RSS enabled - left as future work if time permits). Current `rss_proxy` is a heuristic TTC+distance threshold and should be called **RSS-style proxy**.
 - Avoid broad claims like "planner-world divergence generally predicts autonomous-driving failures." The current safe claim is planner/benchmark specific.
 
 ### Required robustness before submission
@@ -221,49 +222,19 @@ The Fail2Drive result parser (`Fail2Drive/tools/f2d_result_parser.py`) has infra
 
 The following issues were identified by an independent code review. Items marked **CRITICAL** must be fixed before any paper submission.
 
-### CRITICAL: Test suite is broken [FIXED]
+### WARNING: Dataset accounting mismatch (39 routes, not 119)
 
-`tests/test_divergence.py` previously imported `build_future_occupancy_windows` which no longer existed — fixed by removing the dead import and the `test_future_occupancy_windows` test. Imports now from `analysis.divergence`.
+Current `processed/` has only 39 route files (32 with collisions), not 119 as earlier noted. Root cause: the simulation runner (`debug_b2d.sh`) does not detect stuck-vehicle-after-collision. When the ego car crashes, it stays at the collision site at 0 velocity while the route timer runs to ~4000+ timesteps. The scenario runner only saves logs on route completion, so:
+- Some routes never complete → no `.pkl` output
+- Others complete after thousands of zero-velocity frames → processed files are enormous but contain no useful post-collision data
 
-### [FIXED] Main `run_analysis.py` PCO is oracle, not causal
+**Fix applied 2026-05-30**: `sparsedrive_b2d_agent_occ.py` now detects stuck-vehicle: `collision_latched` + `ego_speed < 0.1` for >100 frames → calls `DivergenceLogger.truncate_and_save()` (truncates timesteps to crash point) then raises `RuntimeError` to end the route. `DivergenceLogger.truncate_and_save()` added in `divergence_logger.py`. This recovers missing routes and avoids 4000+ garbage frames. Requires CARLA re-simulation to activate.
 
-`planner_conditioned_occupancy` now has `causal=True` as default (`divergence.py:240`). `run_analysis.py:1115` calls with `causal=True`. Oracle is available as ablation via `causal=False`. The 0.685 causal AUROC is now computed by the pipeline, not manually.
-
-### [FIXED] 0.5s labeling gap
-
-`process_logs.py:40-41` previously started the lookahead at `i + 10` frames (0.5s offset), contaminating 351 frames. **Fixed**: lookahead now starts at `i + 1` (excludes current frame — measures prediction, not detection). TTC formula uses `(index + 1) / fps` to convert slice-relative to frame-relative. All 143 routes re-processed. 0 self-labeled, 0 inconsistent, min TTC = 0.050s.
-
-### [FIXED] Matched-bin drops right-edge frames
-
-`run_analysis.py:60-66` `finite_percentile_edges` already sets `edges[-1] = np.inf`, and speed uses hardcoded `np.inf` as last edge. No frames are dropped.
-
-### WARNING: Matched-bin p-values are anti-conservative
-
-`run_analysis.py:295,343` uses frame-level Mann-Whitney U tests on autocorrelated frames clustered by route and collision event. Frame-level tests inflate significance on non-independent samples.
-
-**Fix**: Replace with route/event-cluster bootstrap or mixed-effects logistic regression (`collision_window ~ PCO + TTC + distance + speed + actor_count + (1|route)`).
-
-Note: `run_analysis.py` already uses `_route_bootstrap_sep` when `route_ids` is provided (line 331, 382), which resamples routes (not frames). Mann-Whitney is only the fallback when `route_ids=None`. The mixed-effects model has been added as `task_joint_confound_model`.
-
-### WARNING: Lead-time PCO threshold is post-hoc tuned
-
-`run_analysis.py:394` uses `pco_threshold=0.15` tuned to the observed collision-window distribution. Lead-time claims using a post-hoc threshold are not generalizable.
-
-**Fix**: Report threshold-free metrics (e.g., early-warning curves, time-dependent AUROC) as the primary lead-time evidence. Report lead-time at fixed thresholds only as secondary with a calibration note.
-
-Note: `task_threshold_free_lead_time` now provides time-dependent AUROC as the primary threshold-free metric.
-
-### WARNING: Dataset accounting mismatch
-
-Notes in earlier analysis claim 120 routes / 40 collisions. Current `Bench2Drive/processed/` has 119 processed route files / 39 collision events. The discrepancy must be reconciled for the reproducibility table.
+**For reproducibility**: The 39 existing routes are an incomplete but not biased subsample. Collision events are distributed across 13 scenario classes (5 Base, 8 Generalization) with no obvious target-class skew. The missing routes are missing due to simulation timeout, not selective omission. This should be documented in the paper.
 
 ### WARNING: `rss_proxy` is a heuristic, not RSS
 
 The `rss_proxy` baseline (`TTC < 2.0 AND dist < 3.0`) is a crude thresholded heuristic, not a proper RSS implementation. Must be called **RSS-style proxy** throughout the paper. (Already documented in framing requirements above — this is a reminder to check the paper text.)
-
-### [FIXED] Causal PCO separation in main analysis
-
-The causal PCO path (repeat current occupancy across all waypoints) is now the default in `run_analysis.py:1115` (`causal=True`). Oracle is available as ablation via `causal=False`. AUROC 0.685 is now computed by the pipeline, not manually. The 0.5s gap fix (now `i+1`) means the causal AUROC may shift slightly — re-run analysis on all 143 processed routes to get the final number.
 
 ### KNOWN LIMITATION: 2D BEV occupancy collapse (overhead obstacles)
 
@@ -274,4 +245,27 @@ PCO is computed from a 2D birds-eye view occupancy grid with **no height dimensi
 - In a real CARLA run (observed), the car drives *under* what appears in BEV as a solid obstacle — the planner correctly navigates it, but PCO incorrectly spikes because it only sees 2D occupancy.
 - Since the negative set includes many bridge/gantry frames with elevated PCO but zero collision risk, this biases AUROC downward (false positives from overhead obstacles). The true PCO discriminative power on ground-level obstacles is higher than reported.
 
-**Mitigation needed for deployment**: Use height-resolved occupancy (multi-layer BEV, LiDAR height maps, or 3D voxel grids) and only penalize occupancy within the vehicle's clearance envelope (below ego hood height).
+**Mitigation needed for deployment**: Use height-resolved occupancy (multi-layer BEV, LiDAR height maps, or 3D voxel grids) and only penalize occupancy within the vehicle's clearance envelope (below ego hood height) - left as future work if time permits.
+
+---
+
+## Future work: VAD integration
+
+**Status**: NOT STARTED.
+
+### Rationale
+The current results are SparseDrive-only. A stronger paper would show the same PCO methodology works on a different planner architecture. VAD (VAD-based agent, `vad_f2d_agent_occ.py`) has its own inlined Guardian with a different grid (240×240, 0.4m/cell).
+
+### What needs to happen
+
+1. **Confirm VAD agent runs end-to-end** in Bench2Drive simulation. The agent file exists (`vad_f2d_agent_occ.py`) but is untested.
+2. **Wire divergence logging into VAD agent** — add the same `DivergenceLogger`-style signal extraction (gc_score, collision_cls, point_collision_cls, occupancy grids).
+3. **Process VAD logs** through same `process_logs.py` pipeline.
+4. **Run analysis** with `run_analysis.py` — the divergence, PCO, and baseline computations are planner-agnostic, so they should work unchanged.
+5. **Compare**: does PCO on VAD also beat TTC? Is the gap larger or smaller?
+
+### Known complications
+- VAD's Guardian is inlined (not imported from `guardian.py`) — the `vad_f2d_agent_occ.py` has its own copy. Any divergence-logger changes need to be ported.
+- BEV grid is different (240×240, 0.4m/cell vs 120×120, 0.5m/cell). The coordinate alignment in `divergence.py` is SparseDrive-specific — will need a VAD-specific alignment variant.
+- VAD may use different trajectory formats, mode scoring, or temporal horizons.
+- Re-simulation requires CARLA runtime.

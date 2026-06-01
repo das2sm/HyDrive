@@ -36,6 +36,7 @@ from divergence import (
     js_divergence,
     js_conflict_score,
     planner_conditioned_occupancy,
+    trajectory_dispersion,
     _align_occupancy_to_planner_bev,
     _smooth_normalise,
 )
@@ -43,21 +44,14 @@ from baselines import compute_baseline_series
 
 
 BASELINE_SCORE_KEYS = [
-    'ttc_proxy_risk', 'ttc_rel_risk', 'dist_proxy_risk', 'rss_proxy',
-    'gc_score', 'gc_overlap_term', 'gc_potential_term',
+    'ttc_risk', 'dist_risk',
     'collision_cls', 'point_collision_cls_mean',
+    'traj_dispersion',
 ]
 
 
 def available_keys(signals, keys):
     return [k for k in keys if k in signals and np.isfinite(signals[k]).any()]
-
-
-def preferred_ttc_key(signals):
-    rel = signals.get('ttc_rel_risk')
-    if rel is not None and np.isfinite(rel).any():
-        return 'ttc_rel_risk'
-    return 'ttc_proxy_risk'
 
 
 def finite_percentile_edges(values, percentiles):
@@ -207,6 +201,7 @@ def task4_auroc_auprc(signals, labels, out_dir, per_route_signals=None, per_rout
         'temporal_conflict_smooth': signals['temporal_conflict_smooth'],
         'temporal_conflict_raw':    signals['temporal_conflict_raw'],
         'planner_conditioned_occupancy': signals['planner_conditioned_occupancy'],
+        'traj_dispersion': signals.get('traj_dispersion', np.full(len(labels), np.nan)),
     }
     for name in available_keys(signals, BASELINE_SCORE_KEYS):
         if name in signals:
@@ -289,9 +284,9 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
     print("="*60)
 
     div = signals['temporal_conflict_smooth']
-    ttc_key = preferred_ttc_key(signals)
+    ttc_key = 'ttc_risk'
     ttc_risk = signals[ttc_key]
-    dist_risk = signals['dist_proxy_risk']
+    dist_risk = signals['dist_risk']
     speed = signals['speed']
     num_actors = np.array([
         t.get('metadata', {}).get('num_actors', np.nan)
@@ -301,7 +296,7 @@ def task5_matched_bin(signals, labels, timesteps, out_dir, route_ids=None):
     # Define binning variables and their edges
     bin_configs = [
         ('speed',          speed,    np.array([0, 2, 5, 10, np.inf])),
-        ('dist_proxy_risk', dist_risk, finite_percentile_edges(dist_risk, [0, 25, 50, 75, 100])),
+        ('dist_risk', dist_risk, finite_percentile_edges(dist_risk, [0, 25, 50, 75, 100])),
         (ttc_key,          ttc_risk, finite_percentile_edges(ttc_risk, [0, 25, 50, 75, 100])),
         ('num_actors',     num_actors, finite_percentile_edges(num_actors, [0, 25, 50, 75, 100])),
     ]
@@ -461,8 +456,8 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
 
     div = signals['temporal_conflict_smooth']
     pco = signals.get('planner_conditioned_occupancy', np.full(len(div), np.nan))
-    ttc_raw_key = 'ttc_rel_raw' if 'ttc_rel_risk' in signals and np.isfinite(signals['ttc_rel_risk']).any() else 'ttc_proxy_raw'
-    ttc_raw = signals[ttc_raw_key]
+    ttc_raw = signals['ttc_raw']
+
 
     div_finite = div[np.isfinite(div)]
     if len(div_finite) == 0:
@@ -473,7 +468,7 @@ def task6_lead_time(signals, timesteps, out_dir, fps=20,
     pco_thresh = float(pco_threshold)
     print(f"  Temporal conflict threshold: {div_thresh:.4f}")
     print(f"  Planner-conditioned occupancy threshold: {pco_thresh:.4f}")
-    print(f"  TTC threshold: {ttc_threshold:.1f}s ({ttc_raw_key})")
+    print(f"  TTC threshold: {ttc_threshold:.1f}s (ttc_raw)")
 
     # Find actual collision frames (collision=True), deduplicated to one per event
     collision_steps = []
@@ -680,14 +675,12 @@ def plot_time_series(signals, labels, timesteps, out_dir, fps=20):
     ax.legend(fontsize=8)
 
     ax = axes[1]
-    ax.plot(t_axis, signals['ttc_proxy_risk'], color='#3498db', label='TTC proxy risk')
-    if 'ttc_rel_risk' in signals and np.isfinite(signals['ttc_rel_risk']).any():
-        ax.plot(t_axis, signals['ttc_rel_risk'], color='#8e44ad', alpha=0.8, label='Actor-relative TTC risk')
+    ax.plot(t_axis, signals['ttc_risk'], color='#3498db', label='TTC risk')
     ax.set_ylabel('TTC Risk')
     ax.legend(fontsize=8)
 
     ax = axes[2]
-    ax.plot(t_axis, signals['dist_proxy_risk'], color='#2ecc71', label='Distance proxy risk')
+    ax.plot(t_axis, signals['dist_risk'], color='#2ecc71', label='Distance risk')
     ax.set_ylabel('Dist Risk')
     ax.legend(fontsize=8)
 
@@ -731,9 +724,9 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
     pre_frames = int(pre_window_s * fps)
     div = signals['temporal_conflict_smooth']
     pco = signals.get('planner_conditioned_occupancy', np.full(len(div), np.nan))
-    ttc_key = preferred_ttc_key(signals)
+    ttc_key = 'ttc_risk'
     ttc_risk = signals[ttc_key]
-    dist_risk = signals['dist_proxy_risk']
+    dist_risk = signals['dist_risk']
 
     # Find actual collision frames
     collision_steps = []
@@ -791,7 +784,7 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
 
     print(f"\n  Events: {len(pos_div)} positive, {len(neg_div_bal)} negative (balanced 1:1)")
     for name, s in [('temporal_conflict', scores_div_bal), ('planner_cond_occ', scores_pco_bal),
-                     (ttc_key, scores_ttc_bal), ('dist_proxy_risk', scores_dist_bal)]:
+                     (ttc_key, scores_ttc_bal), ('dist_risk', scores_dist_bal)]:
         auroc = roc_auc(s, ev_labels_bal)
         auprc = pr_auc(s, ev_labels_bal)
         print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
@@ -806,7 +799,7 @@ def task_event_level(signals, timesteps, out_dir, fps=20, pre_window_s=3.0):
 
     print(f"\n  Events: {len(pos_div)} positive, {len(neg_div_nat)} negative (natural prevalence={prev:.3f})")
     for name, s in [('temporal_conflict', scores_div_nat), ('planner_cond_occ', scores_pco_nat),
-                     (ttc_key, scores_ttc_nat), ('dist_proxy_risk', scores_dist_nat)]:
+                     (ttc_key, scores_ttc_nat), ('dist_risk', scores_dist_nat)]:
         auroc = roc_auc(s, ev_labels_nat)
         auprc = pr_auc(s, ev_labels_nat)
         print(f"  {name:15s}: event-AUROC={auroc:.3f}  event-AUPRC={auprc:.3f}")
@@ -827,10 +820,10 @@ def task_threshold_free_lead_time(signals, l_labels, out_dir, full_timesteps=Non
 
     div = signals.get('temporal_conflict_smooth', np.full(len(l_labels), np.nan))
     pco = signals.get('planner_conditioned_occupancy', np.full(len(l_labels), np.nan))
-    ttc_key = preferred_ttc_key(signals)
+    traj_disp = signals.get('traj_dispersion', np.full(len(l_labels), np.nan))
+    ttc_key = 'ttc_risk'
     ttc = signals.get(ttc_key, np.full(len(l_labels), np.nan))
-    dist = signals.get('dist_proxy_risk', np.full(len(l_labels), np.nan))
-    gc = signals.get('gc_score', np.full(len(l_labels), np.nan))
+    dist = signals.get('dist_risk', np.full(len(l_labels), np.nan))
     col_cls = signals.get('collision_cls', np.full(len(l_labels), np.nan))
 
     # Find collision events from full (unfiltered) timesteps
@@ -863,9 +856,9 @@ def task_threshold_free_lead_time(signals, l_labels, out_dir, full_timesteps=Non
     candidates = {
         'temporal_conflict': div,
         'planner_cond_occ': pco,
+        'traj_dispersion': traj_disp,
         ttc_key: ttc,
-        'dist_proxy_risk': dist,
-        'gc_score': gc,
+        'dist_risk': dist,
         'collision_cls': col_cls,
     }
     # Drop signals that are all NaN
@@ -958,22 +951,22 @@ def task_joint_confound_model(signals, labels, timesteps, out_dir, route_ids=Non
     df = pd.DataFrame({
         'collision_window': labels.astype(float),
         'pco': signals.get('planner_conditioned_occupancy', np.full(len(labels), np.nan)),
-        'ttc': signals.get(preferred_ttc_key(signals), np.full(len(labels), np.nan)),
-        'dist': signals.get('dist_proxy_risk', np.full(len(labels), np.nan)),
+        'traj_dispersion': signals.get('traj_dispersion', np.full(len(labels), np.nan)),
+        'ttc': signals.get('ttc_risk', np.full(len(labels), np.nan)),
+        'dist': signals.get('dist_risk', np.full(len(labels), np.nan)),
         'speed': signals.get('speed', np.full(len(labels), np.nan)),
         'actor_count': np.array([
             t.get('metadata', {}).get('num_actors', np.nan)
             for t in timesteps
         ], dtype=np.float64),
         'conflict': signals.get('temporal_conflict_smooth', np.full(len(labels), np.nan)),
-        'gc_score': signals.get('gc_score', np.full(len(labels), np.nan)),
         'collision_cls': signals.get('collision_cls', np.full(len(labels), np.nan)),
     })
     if route_ids is not None:
         df['route_id'] = route_ids.astype(int)
 
     # Drop rows with any NaN in predictors
-    predictors = ['pco', 'ttc', 'dist', 'speed', 'actor_count']
+    predictors = ['pco', 'traj_dispersion', 'ttc', 'dist', 'speed', 'actor_count']
     model_df = df.dropna(subset=['collision_window'] + predictors)
 
     # Also drop rows where ttc is exactly the censor value (no hazard)
@@ -985,7 +978,7 @@ def task_joint_confound_model(signals, labels, timesteps, out_dir, route_ids=Non
 
     print("\n  Univariate logistic regressions (collision_window ~ predictor):")
     uni_results = {}
-    for p in predictors + ['conflict', 'gc_score', 'collision_cls']:
+    for p in predictors + ['conflict', 'collision_cls']:
         sub = df.dropna(subset=['collision_window', p])
         if len(sub) < 100:
             continue
@@ -1074,7 +1067,7 @@ def task_baseline_sensitivity(all_routes_ts, eval_mask, labels_occ):
         ('dist_horizon', [20.0, 30.0, 50.0]),
         ('dist_tau', [5.0, 10.0, 15.0]),
     ]
-    score_keys = ['ttc_proxy_risk', 'ttc_rel_risk', 'dist_proxy_risk', 'rss_proxy']
+    score_keys = ['ttc_risk', 'dist_risk']
 
     for param, values in specs:
         print(f"  {param}:")
@@ -1136,6 +1129,7 @@ def main():
             'divergence_smooth',
             'planner_conditioned_occupancy',
             'pco_oracle',
+            'traj_dispersion',
             'has_occupancy',
         ]
     }
@@ -1156,6 +1150,7 @@ def main():
         base = compute_baseline_series(route_ts)
         pco, _ = planner_conditioned_occupancy(route_ts, blur_sigma=0.0, causal=True)
         pco_oracle, _ = planner_conditioned_occupancy(route_ts, blur_sigma=0.0, causal=False)
+        traj_disp = trajectory_dispersion(route_ts)
         if all_base_signals is None:
             all_base_signals = {k: [] for k in base}
         for k in all_div_signals:
@@ -1163,10 +1158,11 @@ def main():
                 all_div_signals[k].append(div[k])
         all_div_signals['planner_conditioned_occupancy'].append(pco)
         all_div_signals['pco_oracle'].append(pco_oracle)
+        all_div_signals['traj_dispersion'].append(traj_disp)
         for k in all_base_signals:
             all_base_signals[k].append(base[k])
 
-        route_sig = {**div, **base, 'planner_conditioned_occupancy': pco, 'pco_oracle': pco_oracle}
+        route_sig = {**div, **base, 'planner_conditioned_occupancy': pco, 'pco_oracle': pco_oracle, 'traj_dispersion': traj_disp}
         per_route_signals.append(route_sig)
         if args.label == 'collision':
             per_route_labels.append(np.array([t['future_collision'] for t in route_ts], dtype=np.float64))
@@ -1237,7 +1233,7 @@ def main():
         print(f"  {name:15s}: AUROC={a:.3f}")
 
     # Per-route AUROC
-    ttc_key = preferred_ttc_key(signals)
+    ttc_key = 'ttc_risk'
     print(f"\n=== PER-ROUTE AUROC (temporal_conflict_smooth vs planner_cond_occ vs {ttc_key}) ===")
     route_aurocs_div, route_aurocs_pco, route_aurocs_ttc = [], [], []
     for i, (rs, rl) in enumerate(zip(per_route_signals_occ, per_route_labels_occ)):
@@ -1257,13 +1253,14 @@ def main():
               f"ttc={np.mean(valid_ttc):.3f}±{np.std(valid_ttc):.3f}")
 
     # Delta AUROC
-    ttc_key = preferred_ttc_key(signals)
+    ttc_key = 'ttc_risk'
     print(f"\n=== DELTA AUROC: temporal_conflict vs planner_cond_occ vs {ttc_key} ===")
     rng = np.random.default_rng(42)
     R = len(per_route_signals_occ)
 
     for label, s_key in [('conflict', 'temporal_conflict_smooth'),
-                          ('pco', 'planner_conditioned_occupancy')]:
+                          ('pco', 'planner_conditioned_occupancy'),
+                          ('traj_disp', 'traj_dispersion')]:
         delta_point = (roc_auc(signals_occ[s_key], labels_occ) -
                        roc_auc(signals_occ[ttc_key], labels_occ))
         delta_vals = []

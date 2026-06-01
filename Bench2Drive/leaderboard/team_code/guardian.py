@@ -31,7 +31,7 @@ class Guardian:
         self.vehicle_width = 2.1                # meters
         self.vehicle_height = 2.0               # meters
         self.longitudinal_margin = 1.2          # extra meters in front/back
-        self.lateral_margin = 0.35               # extra meters on sides (important for future swerving)
+        self.lateral_margin = 0.0                # research logging — no safety margin (intervene=False)
         self.sweep_sample_spacing = 0.9         # max meters between swept-volume OBB samples
         self.max_debug_boxes = 80               # throttle CARLA debug draw load
         self.debug_draw_interval = 2
@@ -39,27 +39,13 @@ class Guardian:
         self._static_level_bbs = None
         
         self.min_eval_traj_extent = 2.0
-        self.path_block_area_threshold = 1.5
-        self.path_block_near_distance = 2.75
-        self.hold_frames_after_block = 12
-        self.block_memory_frames_after_seen = 100
-        self.min_new_block_speed = 0.50
-        self.fast_block_speed = 2.00
-        self.path_block_confirm_frames = 3
-        self.emergency_decel_threshold = 3.5
-        self.close_block_base_distance = 5.0
-        self.close_block_time_headway = 1.0
-        
-        self._hold_frames = 0
-        self._block_memory_frames = 0
-        self._path_block_confirmations = 0
-        self._last_valid_traj = None
+
+        # TTC parameters: forward cone half-angle (60° per AGENTS.md convention)
+        self.ttc_half_angle_deg = 60
+        self.ttc_half_angle_tan = math.tan(math.radians(self.ttc_half_angle_deg))
 
         self.expensive_step_interval = 1   # compute every step to minimise occupancy staleness
         self._step_counter = 0
-
-        self.skip_cri = True
-        self.skip_path_blockage = True
         
         # Performance optimization: cache expensive actor iteration
         self._cached_occ_grid = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
@@ -87,16 +73,6 @@ class Guardian:
         self.latest_min_dist_valid = False
         self.latest_ttc = np.nan
         self.latest_ttc_valid = False
-        self.latest_ttc_rel = np.nan
-        self.latest_ttc_rel_valid = False
-        self.latest_ttc_rel_distance = np.nan
-        self.latest_ttc_rel_closing_speed = np.nan
-        self.latest_gc_score = np.nan
-        self.latest_gc_overlap_term = np.nan
-        self.latest_gc_potential_term = np.nan
-        self.latest_gc_decel_term = np.nan
-        self.latest_gc_ttc_term = np.nan
-        self.latest_ttc_rel_actor_type = 'none'
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         self.log_path = os.path.join(log_dir, f'guardian_{timestamp}.csv')
@@ -107,12 +83,8 @@ class Guardian:
             writer.writerow([
                 'step', 'timestamp', 'ego_x', 'ego_y', 'ego_yaw', 'ego_speed',
                 'overlap_ratio', 'min_occupied_distance', 'min_occupied_distance_valid',
-                'ttc_occupied', 'ttc_occupied_valid', 'ttc_rel', 'ttc_rel_valid',
-                'ttc_rel_distance', 'ttc_rel_closing_speed', 'ttc_rel_actor_type',
-                'req_decel', 'gc_score', 'gc_overlap_term', 'gc_potential_term',
-                'gc_decel_term', 'gc_ttc_term', 'cri_score', 'risk_direction',
-                'path_blocked', 'path_blockage_area', 'blocker_distance',
-                'blocker_type', 'eval_traj_held',
+                'ttc_occupied', 'ttc_occupied_valid',
+                'eval_traj_held',
                 'occupancy_source',
                 'intervention_flag', 'brake_command', 'throttle_command',
                 'actor_count'
@@ -146,16 +118,7 @@ class Guardian:
         extent = self._trajectory_extent(traj)
         
         if extent >= self.min_eval_traj_extent:
-            self._last_valid_traj = traj.copy()
             return traj, False
-        
-        speed_value = float(np.asarray(speed).reshape(-1)[0])
-        if (
-            self._last_valid_traj is not None
-            and speed_value < 1.0
-            and (self._hold_frames > 0 or self._block_memory_frames > 0)
-        ):
-            return self._last_valid_traj.copy(), True
         
         return traj, False
     
@@ -300,10 +263,6 @@ class Guardian:
             pts = corners.astype(np.int32)
             cv2.fillConvexPoly(mask, pts, 1.0)
         
-        # Safety dilation
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=1).astype(np.float32)
-        
         return mask
     
     def _bbox_world_vertices(self, bbox, actor_transform=None):
@@ -339,11 +298,15 @@ class Guardian:
         points_world = np.array([[v.x, v.y, v.z] for v in vertices_world], dtype=np.float64)
         local = self._world_to_ego_local_points(points_world, ego_transform)
         
-        # Ignore boxes that are fully outside the relevant vertical slab.
-        if local[:, 2].max() < -2.5 or local[:, 2].min() > 5.0:
+        # Only consider vertices within the vehicle-height slab.
+        # This excludes overhead parts (lamp arms, bridge undersides, canopies)
+        # while keeping ground-level obstacles (poles, barriers, vehicles).
+        max_z = self.vehicle_height + 0.5
+        in_slab = (local[:, 2] >= -2.5) & (local[:, 2] <= max_z)
+        if not in_slab.any():
             return False
         
-        grid = self._local_to_grid(local[:, :2])
+        grid = self._local_to_grid(local[in_slab, :2])
         
         if (
             grid[:, 0].max() < -10 or grid[:, 0].min() > self.grid_size + 10
@@ -362,7 +325,8 @@ class Guardian:
         
         labels = []
         for name in [
-            'Static', 'Walls', 'Fences', 'GuardRail', 'TrafficLight',
+            # 'Static' excluded — road surface meshes cause false positives
+            'Walls', 'Fences', 'GuardRail', 'TrafficLight',
             'TrafficSigns', 'Poles', 'Buildings'
         ]:
             if hasattr(carla.CityObjectLabel, name):
@@ -401,10 +365,17 @@ class Guardian:
                 continue
             
             type_id = actor.type_id
-            if not (type_id.startswith(('vehicle.', 'walker.')) or 'static.prop' in type_id):
+            if not type_id.startswith(('vehicle.', 'walker.')):
                 continue
             
             try:
+                # Skip actors with unrealistically large bounding boxes
+                # Skip actors with unrealistically large bounding boxes
+                # (e.g. road surface meshes with radius > 50m).
+                extent = actor.bounding_box.extent
+                if math.hypot(float(extent.x), float(extent.y)) > 10.0:
+                    continue
+
                 t = actor.get_transform()
                 dx = t.location.x - ego_pos[0]
                 dy = t.location.y - ego_pos[1]
@@ -445,245 +416,7 @@ class Guardian:
             except Exception:
                 continue
         
-        # Slight dilation on obstacles
-        if actor_count + static_count > 0:
-            occ_grid = cv2.dilate(occ_grid.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(np.float32)
-
         return occ_grid, {'actor_count': actor_count + static_count, 'source': 'carla_oracle'}
-    
-    def _swept_footprint_polygons(self, traj):
-        half_len = self.vehicle_length / 2 + self.longitudinal_margin
-        half_wid = self.vehicle_width / 2 + self.lateral_margin
-        
-        corners = np.array([
-            [-half_len, -half_wid],
-            [ half_len, -half_wid],
-            [ half_len,  half_wid],
-            [-half_len,  half_wid]
-        ], dtype=np.float32)
-        
-        polygons = []
-        bbox_yaw = np.deg2rad(self._ego_bbox_rotation.yaw)
-        
-        for forward, right, yaw in self._sample_carla_local_trajectory(traj):
-            center = np.array([
-                forward + self._ego_bbox_location.x,
-                right + self._ego_bbox_location.y
-            ], dtype=np.float32)
-            
-            angle = yaw + bbox_yaw
-            c, s = np.cos(angle), np.sin(angle)
-            rot = np.array([[c, -s], [s, c]], dtype=np.float32)
-            polygons.append((rot @ corners.T).T + center)
-        
-        return polygons
-    
-    def _footprint_from_world_vertices(self, vertices_world, ego_transform):
-        if not vertices_world:
-            return None, None
-        
-        points_world = np.array([[v.x, v.y, v.z] for v in vertices_world], dtype=np.float64)
-        local = self._world_to_ego_local_points(points_world, ego_transform)
-        
-        if local[:, 2].max() < -2.5 or local[:, 2].min() > 5.0:
-            return None, None
-        
-        hull = cv2.convexHull(local[:, :2].astype(np.float32)).reshape(-1, 2)
-        center = np.mean(local[:, :2], axis=0)
-        
-        return hull, center
-    
-    def _convex_intersection_area(self, poly_a, poly_b):
-        try:
-            area, _ = cv2.intersectConvexConvex(
-                poly_a.astype(np.float32),
-                poly_b.astype(np.float32)
-            )
-            return float(area)
-        except Exception:
-            return 0.0
-    
-    def _compute_path_blockage(self, traj, ego_transform):
-        swept_polys = self._swept_footprint_polygons(traj)
-        if not swept_polys:
-            return {
-                'path_blocked': False,
-                'path_blockage_area': 0.0,
-                'blocker_type': 'none',
-                'blocker_direction': 'none',
-                'blocker_distance': 99.0
-            }
-        
-        ego_xy = np.array([ego_transform.location.x, ego_transform.location.y], dtype=np.float64)
-        
-        max_area = 0.0
-        min_distance = 99.0
-        blocker_type = 'none'
-        blocker_direction = 'none'
-        
-        def check_footprint(vertices_world, obj_type):
-            nonlocal max_area, min_distance, blocker_type, blocker_direction
-            
-            footprint, center = self._footprint_from_world_vertices(vertices_world, ego_transform)
-            if footprint is None:
-                return
-            
-            distance = float(np.linalg.norm(center))
-            
-            # Broad phase: only compare obstacle footprints near the swept envelope.
-            for sweep in swept_polys:
-                if np.linalg.norm(np.mean(sweep, axis=0) - center) > 18.0:
-                    continue
-                
-                area = self._convex_intersection_area(sweep, footprint)
-                if area > max_area:
-                    max_area = area
-                    min_distance = distance
-                    blocker_type = obj_type
-                    blocker_direction = self._direction_bin(float(center[0]), float(center[1]))
-        
-        for actor in self.world.get_actors():
-            if actor.attributes.get('role_name') == 'hero':
-                continue
-            
-            type_id = actor.type_id
-            if not (type_id.startswith(('vehicle.', 'walker.')) or 'static.prop' in type_id):
-                continue
-            
-            try:
-                transform = actor.get_transform()
-                dist = transform.location.distance(ego_transform.location)
-                if dist > 70.0:
-                    continue
-                
-                check_footprint(self._bbox_world_vertices(actor.bounding_box, transform), type_id)
-            except Exception:
-                continue
-        
-        for bbox in self._get_static_level_bbs():
-            try:
-                loc = bbox.location
-                radius = max(float(bbox.extent.x), float(bbox.extent.y))
-                if np.linalg.norm([loc.x - ego_xy[0], loc.y - ego_xy[1]]) - radius > 70.0:
-                    continue
-                
-                check_footprint(self._bbox_world_vertices(bbox), 'level_static')
-            except Exception:
-                continue
-        
-        path_blocked = (
-            max_area >= self.path_block_area_threshold
-            # or (max_area > 0.0 and min_distance <= self.path_block_near_distance)
-        )
-        
-        return {
-            'path_blocked': path_blocked,
-            'path_blockage_area': max_area,
-            'blocker_type': blocker_type,
-            'blocker_direction': blocker_direction,
-            'blocker_distance': min_distance
-        }
-
-    def _compute_actor_relative_ttc(self, ego_transform, ego_speed, max_dist=75.0):
-        """
-        Estimate minimum actor-relative TTC from CARLA actor positions/velocities.
-
-        This is a transparent research baseline, not a formal RSS/NCAP
-        implementation. It uses line-of-sight closing speed and approximate
-        bounding-circle clearance.
-        """
-        result = {
-            'ttc': 99.0,
-            'valid': True,
-            'distance': 99.0,
-            'closing_speed': 0.0,
-            'actor_type': 'none',
-            'actor_id': -1,
-        }
-
-        if self.world is None:
-            result.update({
-                'ttc': np.nan,
-                'valid': False,
-                'distance': np.nan,
-                'closing_speed': np.nan,
-            })
-            return result
-
-        speed_value = float(np.asarray(ego_speed).reshape(-1)[0])
-        if not np.isfinite(speed_value):
-            result.update({
-                'ttc': np.nan,
-                'valid': False,
-                'distance': np.nan,
-                'closing_speed': np.nan,
-            })
-            return result
-
-        ego_radius = math.hypot(self.vehicle_length / 2.0, self.vehicle_width / 2.0)
-
-        try:
-            actors = self._actor_list_cache if self._actor_list_cache is not None else list(self.world.get_actors())
-        except Exception:
-            result.update({
-                'ttc': np.nan,
-                'valid': False,
-                'distance': np.nan,
-                'closing_speed': np.nan,
-            })
-            return result
-
-        best_ttc = 99.0
-        for actor in actors:
-            try:
-                if hasattr(actor, 'attributes') and actor.attributes.get('role_name') == 'hero':
-                    continue
-
-                type_id = actor.type_id
-                if not (type_id.startswith(('vehicle.', 'walker.')) or 'static.prop' in type_id):
-                    continue
-
-                transform = actor.get_transform()
-                bbox_center = self._transform_location(transform, actor.bounding_box.location)
-                local = self._world_to_ego_local_points(
-                    np.array([[bbox_center.x, bbox_center.y, bbox_center.z]], dtype=np.float64),
-                    ego_transform
-                )[0]
-
-                forward, right = float(local[0]), float(local[1])
-                dist = math.hypot(forward, right)
-                if dist < 1e-3 or dist > max_dist or local[2] < -2.5 or local[2] > 5.0:
-                    continue
-
-                if type_id.startswith(('vehicle.', 'walker.')):
-                    actor_vel = self._velocity_to_ego_local(actor.get_velocity(), ego_transform)
-                else:
-                    actor_vel = np.zeros(2, dtype=np.float64)
-
-                rel_vel = actor_vel - np.array([speed_value, 0.0], dtype=np.float64)
-                unit = np.array([forward, right], dtype=np.float64) / dist
-                closing_speed = max(0.0, -float(np.dot(rel_vel, unit)))
-                if closing_speed <= 0.1:
-                    continue
-
-                extent = actor.bounding_box.extent
-                actor_radius = math.hypot(float(extent.x), float(extent.y))
-                clearance = max(dist - ego_radius - actor_radius, 0.0)
-                ttc = clearance / closing_speed
-
-                if ttc < best_ttc:
-                    best_ttc = ttc
-                    result.update({
-                        'ttc': float(ttc),
-                        'distance': float(clearance),
-                        'closing_speed': float(closing_speed),
-                        'actor_type': type_id,
-                        'actor_id': int(getattr(actor, 'id', -1)),
-                    })
-            except Exception:
-                continue
-
-        return result
     
     def evaluate(self, traj, ego_transform, speed, ego_actor=None):
         """Lightweight evaluation for research logging."""
@@ -723,61 +456,95 @@ class Guardian:
             occupied_conflict = np.argwhere(conflict_mask)
             local_conflict = self._grid_to_local(occupied_conflict)
 
-            min_dist = float(
-                np.linalg.norm(local_conflict, axis=1).min()
-            )
+            forward_vals, right_vals = local_conflict[:, 0], local_conflict[:, 1]
+            front_mask = (forward_vals > 0) & (np.abs(right_vals) <= forward_vals * self.ttc_half_angle_tan)
+            if front_mask.any():
+                min_dist = float(
+                    np.linalg.norm(local_conflict[front_mask], axis=1).min()
+                )
+            else:
+                min_dist = 99.0
         else:
             min_dist = 99.0
         
-        # ----- 4. TTC (simplified) -----
-        if speed_value > 0.5 and min_dist < 50:
-            ttc = min_dist / max(speed_value, 0.1)
-        else:
-            ttc = 99.0
+        # ----- 4. TTC (closing-speed aware) -----
+        # Per-actor closing-speed TTC for actors in the swept path + forward
+        # cone.  Correctly handles car-following (same speed → closing near
+        # zero → high TTC).  Falls back to path-based min_dist / ego_speed.
+        ego_pos = np.array([ego_transform.location.x, ego_transform.location.y])
+        ego_yaw_rad = math.radians(ego_transform.rotation.yaw)
+        cos_yaw = math.cos(ego_yaw_rad)
+        sin_yaw = math.sin(ego_yaw_rad)
 
-        actor_ttc = self._compute_actor_relative_ttc(ego_transform, speed_value)
+        ttc_from_dist = 99.0
+        if speed_value > 0.5 and min_dist < 50:
+            ttc_from_dist = min_dist / max(speed_value, 0.1)
+
+        closing_ttc = 99.0
+        found_actor_on_path = False
+        for actor in getattr(self, '_actor_list_cache', []):
+            if actor.attributes.get('role_name') == 'hero':
+                continue
+            if not actor.type_id.startswith(('vehicle.', 'walker.')):
+                continue
+            try:
+                extent = actor.bounding_box.extent
+                if math.hypot(float(extent.x), float(extent.y)) > 10.0:
+                    continue
+
+                t = actor.get_transform()
+                dx = t.location.x - ego_pos[0]
+                dy = t.location.y - ego_pos[1]
+                dist = math.hypot(dx, dy)
+                if dist > 75.0:
+                    continue
+
+                forward = dx * cos_yaw + dy * sin_yaw
+                right = -dx * sin_yaw + dy * cos_yaw
+                if forward <= 0 or math.fabs(right) > forward * self.ttc_half_angle_tan:
+                    continue
+
+                col = forward / self.resolution + self.origin
+                row = right / self.resolution + self.origin
+                ri, ci = int(round(row)), int(round(col))
+                if 0 <= ri < self.grid_size and 0 <= ci < self.grid_size:
+                    if conflict_mask[ri, ci] <= 0.5:
+                        continue
+                else:
+                    continue
+
+                found_actor_on_path = True
+                vel = actor.get_velocity()
+                v_ego_x = speed_value * cos_yaw
+                v_ego_y = speed_value * sin_yaw
+                rel_x = vel.x - v_ego_x
+                rel_y = vel.y - v_ego_y
+                closing = max(0.0, -(rel_x * dx + rel_y * dy) / dist)
+
+                if closing > 0.1:
+                    ttc_a = dist / closing
+                    if ttc_a < closing_ttc:
+                        closing_ttc = ttc_a
+            except Exception:
+                continue
+
+        if found_actor_on_path:
+            ttc = closing_ttc
+        else:
+            ttc = ttc_from_dist
+
         proxy_source_valid = occ_meta.get('source') not in ('error', 'none', 'init')
         min_dist_valid = bool(proxy_source_valid and np.isfinite(min_dist) and min_dist >= 0.0)
         ttc_valid = bool(proxy_source_valid and np.isfinite(ttc) and ttc >= 0.0)
-        
-        # ----- 5. Skip expensive CRI and path blockage -----
-        if self.skip_cri:
-            cri_score = 0.0
-            cri_direction = 'none'
-        else:
-            cri_score, cri_direction = self._compute_cri(ego_transform, speed_value)
-        
-        if self.skip_path_blockage:
-            path_block = {
-                'path_blocked': False,
-                'path_blockage_area': 0.0,
-                'blocker_distance': min_dist,   # reuse min_dist
-                'blocker_type': 'none',
-                'blocker_direction': 'none'
-            }
-        else:
-            path_block = self._compute_path_blockage(eval_traj, ego_transform)
-        
-        # ----- 6. Risk score (optional, not used for logging) -----
-        decel_dist = path_block['blocker_distance'] if path_block['path_blocked'] else 50.0
-        req_decel = (speed_value ** 2) / (2 * max(decel_dist, 1.0)) if speed_value > 0.5 and decel_dist < 50 else 0.0
-        req_decel = min(req_decel, 8.0)
-        Gc, gc_terms = self._compute_gc_score(overlap_ratio, min_dist, req_decel)
-        if not self.skip_cri:
-            Gc = max(Gc, cri_score)
-        
-        # ----- 7. Intervention logic (you may keep or disable) -----
-        intervene = False   # we don't need it for research dataset
-        # If you still want intervention, keep the state machine, but it's not needed.
-        
-        # ----- 8. Visualisation (reduce frequency) -----
+
+        # ----- 5. Intervention logic disabled -----
+        intervene = False
+
+        # ----- 6. Visualisation (reduce frequency) -----
         if self.debug and self._draw_counter % max(self.debug_draw_interval, 10) == 0:
             self.visualize_in_carla(eval_traj, ego_transform, ego_actor=ego_actor, intervene=intervene)
-        
+
         # ----- 9. Logging (kept for divergence analysis) -----
-        ego_pos = np.array([ego_transform.location.x, ego_transform.location.y])
-        ego_yaw_rad = np.deg2rad(ego_transform.rotation.yaw)
-        
         self.log_data.append({
             'ego_x': ego_pos[0], 'ego_y': ego_pos[1], 'ego_yaw': ego_yaw_rad,
             'ego_speed': speed_value,
@@ -786,20 +553,6 @@ class Guardian:
             'min_occupied_distance_valid': min_dist_valid,
             'ttc_occupied': ttc,
             'ttc_occupied_valid': ttc_valid,
-            'ttc_rel': actor_ttc['ttc'],
-            'ttc_rel_valid': actor_ttc['valid'],
-            'ttc_rel_distance': actor_ttc['distance'],
-            'ttc_rel_closing_speed': actor_ttc['closing_speed'],
-            'ttc_rel_actor_type': actor_ttc['actor_type'],
-            'req_decel': req_decel,
-            'gc_score': Gc,
-            **gc_terms,
-            'cri_score': cri_score,
-            'risk_direction': path_block['blocker_direction'] if path_block['path_blocked'] else cri_direction,
-            'path_blocked': int(path_block['path_blocked']),
-            'path_blockage_area': path_block['path_blockage_area'],
-            'blocker_distance': path_block['blocker_distance'],
-            'blocker_type': path_block['blocker_type'],
             'eval_traj_held': int(eval_traj_held),
             'occupancy_source': occ_meta['source'],
             'intervention_flag': 0,                  # disabled
@@ -813,114 +566,9 @@ class Guardian:
         self.latest_min_dist_valid = min_dist_valid
         self.latest_ttc = ttc
         self.latest_ttc_valid = ttc_valid
-        self.latest_ttc_rel = actor_ttc['ttc']
-        self.latest_ttc_rel_valid = actor_ttc['valid']
-        self.latest_ttc_rel_distance = actor_ttc['distance']
-        self.latest_ttc_rel_closing_speed = actor_ttc['closing_speed']
-        self.latest_ttc_rel_actor_type = actor_ttc['actor_type']
-        self.latest_gc_score = Gc
-        self.latest_gc_overlap_term = gc_terms['gc_overlap_term']
-        self.latest_gc_potential_term = gc_terms['gc_potential_term']
-        self.latest_gc_decel_term = gc_terms['gc_decel_term']
-        self.latest_gc_ttc_term = gc_terms['gc_ttc_term']
 
         return False, 0.0   # never intervene
-    
-    def _compute_gc_score(self, overlap_ratio, min_dist, req_decel):
-        overlap_score = min(overlap_ratio * 1.1, 0.65)
-        potential_score = np.exp(-min_dist / 4.5)
-        decel_score = min(req_decel / 7.0, 1.0)
-        
-        Gc = max(overlap_score, potential_score * 0.45, decel_score)
-        
-        return Gc, {
-            'gc_overlap_term': overlap_score,
-            'gc_potential_term': potential_score,
-            'gc_decel_term': decel_score,
-            'gc_ttc_term': 0.0
-        }
-    
-    def _direction_bin(self, forward, right):
-        angle = math.degrees(math.atan2(right, forward))
-        
-        if -22.5 <= angle < 22.5:
-            return 'front'
-        if 22.5 <= angle < 67.5:
-            return 'front-right'
-        if 67.5 <= angle < 112.5:
-            return 'right'
-        if 112.5 <= angle < 157.5:
-            return 'rear-right'
-        if angle >= 157.5 or angle < -157.5:
-            return 'rear'
-        if -157.5 <= angle < -112.5:
-            return 'rear-left'
-        if -112.5 <= angle < -67.5:
-            return 'left'
-        return 'front-left'
-    
-    def _velocity_to_ego_local(self, velocity, ego_transform):
-        yaw = np.deg2rad(ego_transform.rotation.yaw)
-        c, s = np.cos(yaw), np.sin(yaw)
-        forward = velocity.x * c + velocity.y * s
-        right = -velocity.x * s + velocity.y * c
-        return np.array([forward, right], dtype=np.float64)
-    
-    def _compute_cri(self, ego_transform, ego_speed, max_dist=45.0):
-        """Lightweight directional risk index in the ego CARLA frame."""
-        max_risk = 0.0
-        max_direction = 'none'
-        
-        for actor in self.world.get_actors():
-            if actor.attributes.get('role_name') == 'hero':
-                continue
-            
-            type_id = actor.type_id
-            if not (type_id.startswith(('vehicle.', 'walker.')) or 'static.prop' in type_id):
-                continue
-            
-            try:
-                transform = actor.get_transform()
-                bbox_center = self._transform_location(transform, actor.bounding_box.location)
-                
-                local = self._world_to_ego_local_points(
-                    np.array([[bbox_center.x, bbox_center.y, bbox_center.z]], dtype=np.float64),
-                    ego_transform
-                )[0]
-                
-                forward, right = float(local[0]), float(local[1])
-                dist = math.hypot(forward, right)
-                
-                if dist < 1e-3 or dist > max_dist or local[2] < -2.5 or local[2] > 5.0:
-                    continue
-                
-                if type_id.startswith(('vehicle.', 'walker.')):
-                    actor_vel = self._velocity_to_ego_local(actor.get_velocity(), ego_transform)
-                else:
-                    actor_vel = np.zeros(2, dtype=np.float64)
-                
-                rel_vel = actor_vel - np.array([float(ego_speed), 0.0], dtype=np.float64)
-                unit = np.array([forward, right], dtype=np.float64) / dist
-                closing_speed = max(0.0, -float(np.dot(rel_vel, unit)))
-                
-                ttc = dist / max(closing_speed, 1e-3) if closing_speed > 0.1 else 99.0
-                
-                distance_term = math.exp(-dist / 12.0)
-                ttc_term = math.exp(-ttc / 3.0) if ttc < 99.0 else 0.0
-                lane_term = math.exp(-((abs(right) / max(self.vehicle_width + 1.5, 0.1)) ** 2))
-                front_term = 1.0 if forward >= -1.0 else 0.35
-                dynamic_term = 1.0 if type_id.startswith(('vehicle.', 'walker.')) else 0.8
-                
-                risk = dynamic_term * front_term * max(distance_term * 0.65, ttc_term) * max(lane_term, 0.25)
-                
-                if risk > max_risk:
-                    max_risk = min(float(risk), 1.0)
-                    max_direction = self._direction_bin(forward, right)
-            except Exception:
-                continue
-        
-        return max_risk, max_direction
-    
+
     def save_log(self, step, timestamp, throttle_cmd):
         if not self.log_data:
             return
@@ -938,24 +586,7 @@ class Guardian:
                 int(entry['min_occupied_distance_valid']),
                 round(entry['ttc_occupied'], 2),
                 int(entry['ttc_occupied_valid']),
-                round(entry['ttc_rel'], 2),
-                int(entry['ttc_rel_valid']),
-                round(entry['ttc_rel_distance'], 2),
-                round(entry['ttc_rel_closing_speed'], 2),
-                entry['ttc_rel_actor_type'],
-                round(entry['req_decel'], 4),
-                round(entry['gc_score'], 4),
-                round(entry['gc_overlap_term'], 4),
-                round(entry['gc_potential_term'], 4),
-                round(entry['gc_decel_term'], 4),
-                round(entry['gc_ttc_term'], 4),
-                round(entry['cri_score'], 4),
-                entry['risk_direction'],
-                entry['path_blocked'],
-                round(entry['path_blockage_area'], 4),
-                round(entry['blocker_distance'], 2),
-                entry['blocker_type'],
-                entry['eval_traj_held'],
+                int(entry['eval_traj_held']),
                 entry['occupancy_source'],
                 entry['intervention_flag'],
                 round(entry['brake_command'], 2),

@@ -84,16 +84,6 @@ class DivergenceLogger:
                      min_distance=None,  # float or None
                      ttc_valid=None,      # bool or None
                      min_distance_valid=None,  # bool or None
-                     ttc_rel=None,        # actor-relative TTC, float or None
-                     ttc_rel_valid=None,  # bool or None
-                     ttc_rel_distance=None,      # float or None
-                     ttc_rel_closing_speed=None, # float or None
-                     ttc_rel_actor_type='none',  # str
-                     gc_score=None,       # float or None — General Criticality
-                     gc_overlap_term=None,  # float or None
-                     gc_potential_term=None,  # float or None
-                     gc_decel_term=None,  # float or None
-                     gc_ttc_term=None,    # float or None
                      collision_cls=None,  # float or None — learned collision score
                      point_collision_cls=None,  # array or None — per-waypoint collision
                      collision=False,    # bool
@@ -116,7 +106,6 @@ class DivergenceLogger:
 
         ttc_value = clean_float(ttc)
         min_distance_value = clean_float(min_distance)
-        ttc_rel_value = clean_float(ttc_rel)
         
         entry = {
             'step': self.step,
@@ -141,19 +130,7 @@ class DivergenceLogger:
                 infer_valid(min_distance_value)
                 if min_distance_valid is None else bool(min_distance_valid)
             ),
-            'ttc_rel': ttc_rel_value,
-            'ttc_rel_valid': infer_valid(ttc_rel_value) if ttc_rel_valid is None else bool(ttc_rel_valid),
-            'ttc_rel_distance': clean_float(ttc_rel_distance),
-            'ttc_rel_closing_speed': clean_float(ttc_rel_closing_speed),
-            'ttc_rel_actor_type': str(ttc_rel_actor_type),
-            
-            # Guardian General Criticality
-            'gc_score': clean_float(gc_score),
-            'gc_overlap_term': clean_float(gc_overlap_term),
-            'gc_potential_term': clean_float(gc_potential_term),
-            'gc_decel_term': clean_float(gc_decel_term),
-            'gc_ttc_term': clean_float(gc_ttc_term),
-            
+
             # Learned collision prediction (SparseDrive planner)
             'collision_cls': clean_float(collision_cls),
             'point_collision_cls': np.asarray(point_collision_cls, dtype=np.float32) if point_collision_cls is not None else np.array([np.nan], dtype=np.float32),

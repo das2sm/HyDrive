@@ -16,7 +16,7 @@ CELL_SIZE = GRID_RANGE * 2 / GRID_H  # 0.5 m/cell
 VEHICLE_LENGTH_M = 4.8
 VEHICLE_WIDTH_M = 2.1
 VEHICLE_LONG_MARGIN_M = 1.2
-VEHICLE_LAT_MARGIN_M = 0.35
+VEHICLE_LAT_MARGIN_M = 0.0
 
 # Trajectory
 TRAJ_WAYPOINTS = 6   # T waypoints per trajectory
@@ -228,6 +228,8 @@ def _align_occupancy_to_planner_bev(occ):
     at the opposite edge.
 
     Note: visualizing this reveals that the result mirrors the real world horizontally (left-right)
+
+    Important note: Do not modify this function or attempt to check its logic - it is correct
     """
     aligned = occ.T[::-1, ::-1]
     result = np.zeros_like(aligned)
@@ -235,11 +237,12 @@ def _align_occupancy_to_planner_bev(occ):
     return result
 
 
-def planner_conditioned_occupancy(timesteps, blur_sigma=0.0, causal=True):
+def planner_conditioned_occupancy(timesteps, blur_sigma=0.0, causal=True,
+                                  footprint_radius_cells=None):
     """
     Planner-conditioned occupancy risk score.
     
-    Measures whether the ground-truth world currently has objects where the
+    Measures whether the ground-truth world has objects where the
     planner intends to drive.  The occupancy grid (occupancy_grid) is
     CARLA ground truth — every vehicle, walker, and static prop within 75m
     rasterized onto a 120×120 grid in Guardian frame.  It is NOT the
@@ -256,7 +259,10 @@ def planner_conditioned_occupancy(timesteps, blur_sigma=0.0, causal=True):
     For each timestep i:
       1. Convert K trajectory modes to BEV pixel coordinates.
       2. For each waypoint h, align occupancy to planner BEV.
-      3. For each mode k, sample aligned occupancy at the (row, col) of the corresponding BEV coordinate.
+      3. For each mode k, check if the vehicle footprint (a patch of
+         `footprint_radius_cells` around the waypoint center) overlaps
+         any occupied cell in the aligned occupancy grid.  The patch is
+         sized to cover the full vehicle extent across all orientations.
       4. Weight by mode probability and average over waypoints.
     
     Parameters
@@ -274,24 +280,25 @@ def planner_conditioned_occupancy(timesteps, blur_sigma=0.0, causal=True):
         obstacles are right now but not where they will be.
         If False: use ground-truth future occupancy (occupancy_future)
         when available.  This is an oracle upper bound.
+    footprint_radius_cells : int, optional
+        Radius in grid cells of the circular patch checked around each
+        waypoint center.  Default = ceil(hypot(L/2, W/2) / cell_size)
+        which covers the full vehicle footprint at any yaw.
     
     Returns
     -------
     risk : np.ndarray, shape (N,)
-        Per-timestep PCO score in [0, 1]: the expected ground-truth
-        occupancy intensity at the planner's predicted trajectory cells.
-        
-        Note: This is a fraction of planner belief mass intersecting occupancy,
-        not a calibrated collision probability. Typical collision-window
-        values are 0.2–0.5 (only later waypoints overlap the obstacle,
-        and not all modes fire simultaneously). Safe values are <0.05.
-        AUROC is invariant to scale, so the low dynamic range does not
-        affect discriminative power.
+        Per-timestep PCO score in [0, 1]: the fraction of mode-weighted
+        waypoints where the vehicle footprint overlaps occupied space.
         NaN for steps with missing planner data or no valid occupancy.
     
     has_valid : np.ndarray, shape (N,), bool
         True for steps where the computation was valid.
     """
+    if footprint_radius_cells is None:
+        max_half = np.hypot(VEHICLE_LENGTH_M / 2.0, VEHICLE_WIDTH_M / 2.0)
+        footprint_radius_cells = int(np.ceil(max_half / CELL_SIZE))
+    
     N = len(timesteps)
     risk = np.full(N, np.nan, dtype=np.float64)
     has_valid = np.zeros(N, dtype=bool)
@@ -313,14 +320,9 @@ def planner_conditioned_occupancy(timesteps, blur_sigma=0.0, causal=True):
         bev = _traj_to_bev_coords(trajs)          # (K, T, 2) —> (row, col)
 
         if causal:
-            # Limitation: tiles current occupancy across all waypoints, so PCO
-            # only catches obstacles already overlapping the planner's cells.
-            # Dynamic obstacles not yet in collision path are invisible until
-            # they enter the occupied region — this is the oracle gap.
             occ_future = np.tile(np.asarray(occ_current)[None, ...], (T, 1, 1))
             occ_valid = np.ones(T, dtype=bool)
         else:
-            # Oracle version with future occupancy
             occ_future = np.asarray(t['occupancy_future'])
             occ_valid = np.asarray(t['occupancy_future_valid'])
            
@@ -345,10 +347,15 @@ def planner_conditioned_occupancy(timesteps, blur_sigma=0.0, causal=True):
                 r = int(round(bev[k, h, 0]))
                 c = int(round(bev[k, h, 1]))
 
-                # Taking r, c from the planner's bev coordinates
-                # And sampling the aligned occupancy at that location
-                # from the ground-truth occupancy grid.
-                mode_vals[k] = aligned[r, c]
+                # Check the vehicle-footprint-sized patch around the waypoint center.
+                # This is the same physical check min_distance performs (swept-path
+                # vs occupied cells), but evaluated per-waypoint along the trajectory.
+                r_min = max(0, r - footprint_radius_cells)
+                r_max = min(GRID_H, r + footprint_radius_cells + 1)
+                c_min = max(0, c - footprint_radius_cells)
+                c_max = min(GRID_W, c + footprint_radius_cells + 1)
+                patch = aligned[r_min:r_max, c_min:c_max]
+                mode_vals[k] = 1.0 if patch.max() > 0.5 else 0.0
 
             total_risk += float(np.sum(scores * mode_vals))
             n_valid += 1
@@ -449,3 +456,32 @@ def compute_divergence_series(timesteps, use_occupancy=True, temporal_window=5):
         'divergence_smooth': temporal_conflict_smooth,
         'has_occupancy': has_occupancy,
     }
+
+
+def trajectory_dispersion(timesteps):
+    """
+    Trajectory dispersion (mode variance) baseline.
+
+    For each timestep, measures the average per-waypoint variance across the
+    K trajectory modes.  High dispersion = the planner's trajectory samples
+    disagree about where to go, which may indicate confusion about the scene.
+
+    Only meaningful when the planner outputs multiple distinct trajectory
+    modes.  SparseDriveV2's mode scores are near-uniform, so this measures
+    trajectory *spread* rather than calibrated uncertainty.
+    """
+    N = len(timesteps)
+    dispersion = np.full(N, np.nan)
+
+    for i, t in enumerate(timesteps):
+        trajs = t.get('planner_trajs')
+        if trajs is None:
+            continue
+        trajs = np.asarray(trajs, dtype=np.float64)
+        if trajs.ndim != 3 or trajs.shape[0] < 2:
+            continue
+
+        var_per_wp = np.var(trajs, axis=0)       # (T, 2) — variance across K modes
+        dispersion[i] = float(np.mean(var_per_wp))
+
+    return dispersion

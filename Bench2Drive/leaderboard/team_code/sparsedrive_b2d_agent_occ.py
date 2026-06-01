@@ -654,11 +654,6 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
         guardian_brake = 0.0
         min_dist_valid = False
         ttc_valid = False
-        ttc_rel = np.nan
-        ttc_rel_valid = False
-        ttc_rel_distance = np.nan
-        ttc_rel_closing_speed = np.nan
-        ttc_rel_actor_type = 'none'
 
         if self.guardian is not None:
             try:
@@ -676,18 +671,6 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
                 ttc = self.guardian.latest_ttc
                 min_dist_valid = getattr(self.guardian, 'latest_min_dist_valid', np.isfinite(min_dist))
                 ttc_valid = getattr(self.guardian, 'latest_ttc_valid', np.isfinite(ttc))
-                ttc_rel = getattr(self.guardian, 'latest_ttc_rel', np.nan)
-                ttc_rel_valid = getattr(self.guardian, 'latest_ttc_rel_valid', False)
-                ttc_rel_distance = getattr(self.guardian, 'latest_ttc_rel_distance', np.nan)
-                ttc_rel_closing_speed = getattr(self.guardian, 'latest_ttc_rel_closing_speed', np.nan)
-                ttc_rel_actor_type = getattr(self.guardian, 'latest_ttc_rel_actor_type', 'none')
-
-                # Pull gc_score from Guardian
-                gc_score = getattr(self.guardian, 'latest_gc_score', np.nan)
-                gc_overlap_term = getattr(self.guardian, 'latest_gc_overlap_term', np.nan)
-                gc_potential_term = getattr(self.guardian, 'latest_gc_potential_term', np.nan)
-                gc_decel_term = getattr(self.guardian, 'latest_gc_decel_term', np.nan)
-                gc_ttc_term = getattr(self.guardian, 'latest_gc_ttc_term', np.nan)
 
                 # Disable intervention unless explicitly enabled
                 if not self.use_guardian:
@@ -709,11 +692,6 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
             min_dist = np.nan
             ttc = np.nan
             occ_meta = {'source': 'none', 'actor_count': 0}
-            gc_score = np.nan
-            gc_overlap_term = np.nan
-            gc_potential_term = np.nan
-            gc_decel_term = np.nan
-            gc_ttc_term = np.nan
         
         # ========== DETECT COLLISION/NEAR-MISS ==========
         collision_occurred = False
@@ -750,25 +728,15 @@ class SparseDriveAgent(autonomous_agent.AutonomousAgent):
 
         if planner_trajs is not None and planner_scores is not None:
             self.divergence_logger.log_timestep(
-                planner_trajs=planner_trajs,      # (K, T, 2) - multiple trajectory modes
-                planner_scores=planner_scores,       # (K,) - probability weights
-                occupancy_grid=occ_grid,          # (H, W) - BEV occupancy
-                ego_transform=ego_transform,      # CARLA transform
-                ego_speed=ego_speed,              # float
-                ttc=ttc,                          # float
-                min_distance=min_dist,            # float
+                planner_trajs=planner_trajs,
+                planner_scores=planner_scores,
+                occupancy_grid=occ_grid,
+                ego_transform=ego_transform,
+                ego_speed=ego_speed,
+                ttc=ttc,
+                min_distance=min_dist,
                 ttc_valid=ttc_valid,
                 min_distance_valid=min_dist_valid,
-                ttc_rel=ttc_rel,
-                ttc_rel_valid=ttc_rel_valid,
-                ttc_rel_distance=ttc_rel_distance,
-                ttc_rel_closing_speed=ttc_rel_closing_speed,
-                ttc_rel_actor_type=ttc_rel_actor_type,
-                gc_score=gc_score,
-                gc_overlap_term=gc_overlap_term,
-                gc_potential_term=gc_potential_term,
-                gc_decel_term=gc_decel_term,
-                gc_ttc_term=gc_ttc_term,
                 collision_cls=collision_cls,
                 point_collision_cls=point_collision_cls,
                 collision=collision_occurred,              # bool

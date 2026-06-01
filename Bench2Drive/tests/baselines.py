@@ -141,38 +141,27 @@ def compute_baseline_series(
     Compute causal heuristic baseline signals.
 
     Score keys:
-      - ttc_proxy_risk: Guardian path-occupancy TTC proxy risk
-      - dist_proxy_risk: Guardian path-occupancy distance proxy risk
-      - ttc_rel_risk: actor-relative TTC risk when available in the log
-      - rss_proxy: thresholded TTC/distance proxy
+      - ttc_risk: Guardian path-occupancy TTC risk (min_dist / speed)
+      - dist_risk: Guardian path-occupancy distance risk
+      - collision_cls: SparseDrive learned collision classifier
+      - point_collision_cls_mean: mean per-waypoint collision score
     """
     n = len(timesteps)
     if n == 0:
         keys = [
-            "ttc_proxy_raw", "ttc_rel_raw",
-            "ttc_proxy_risk", "ttc_rel_risk", "dist_proxy_risk", "rss_proxy",
-            "gc_score", "gc_overlap_term", "gc_potential_term", "gc_decel_term", "gc_ttc_term",
+            "ttc_raw", "ttc_risk", "dist_risk",
             "collision_cls", "point_collision_cls_mean",
             "speed",
         ]
         return {k: np.array([], dtype=np.float64) for k in keys}
 
-    ttc_proxy_raw = _extract_float(timesteps, "ttc")
-    dist_proxy_raw = _extract_float(timesteps, "min_distance")
-    ttc_rel_raw = _extract_float(timesteps, "ttc_rel")
+    ttc_raw = _extract_float(timesteps, "ttc")
+    dist_raw = _extract_float(timesteps, "min_distance")
     speed = _extract_float(timesteps, "ego_speed")
 
-    ttc_proxy_explicit = _extract_optional_bool(timesteps, ["ttc_valid"])
-    dist_proxy_explicit = _extract_optional_bool(timesteps, ["min_distance_valid"])
-    ttc_rel_explicit = _extract_optional_bool(timesteps, ["ttc_rel_valid"])
+    ttc_explicit = _extract_optional_bool(timesteps, ["ttc_valid"])
+    dist_explicit = _extract_optional_bool(timesteps, ["min_distance_valid"])
     speed_valid = np.isfinite(speed) & (speed >= -5.0) & (speed <= MAX_REALISTIC_SPEED)
-
-    # Guardian General Criticality
-    gc_score = _extract_float(timesteps, "gc_score")
-    gc_overlap_term = _extract_float(timesteps, "gc_overlap_term")
-    gc_potential_term = _extract_float(timesteps, "gc_potential_term")
-    gc_decel_term = _extract_float(timesteps, "gc_decel_term")
-    gc_ttc_term = _extract_float(timesteps, "gc_ttc_term")
 
     # Learned collision prediction
     collision_cls = _extract_float(timesteps, "collision_cls")
@@ -181,53 +170,29 @@ def compute_baseline_series(
     occupancy_source = _extract_metadata_string(timesteps, "occupancy_source")
     source_invalid = np.isin(occupancy_source, INVALID_OCCUPANCY_SOURCES)
 
-    ttc_proxy_valid = _infer_valid(ttc_proxy_raw, ttc_proxy_explicit, source_invalid) & speed_valid
-    dist_proxy_valid = _infer_valid(dist_proxy_raw, dist_proxy_explicit, source_invalid)
-    ttc_rel_valid = _infer_valid(ttc_rel_raw, ttc_rel_explicit, None)
+    ttc_valid = _infer_valid(ttc_raw, ttc_explicit, source_invalid) & speed_valid
+    dist_valid = _infer_valid(dist_raw, dist_explicit, source_invalid)
 
-    ttc_proxy_clean = _right_censor(
-        ttc_proxy_raw,
-        ttc_proxy_valid,
+    ttc_clean = _right_censor(
+        ttc_raw,
+        ttc_valid,
         horizon=ttc_horizon,
         censor_value=TTC_RIGHT_CENSOR,
     )
-    dist_proxy_clean = _right_censor(
-        dist_proxy_raw,
-        dist_proxy_valid,
+    dist_clean = _right_censor(
+        dist_raw,
+        dist_valid,
         horizon=dist_horizon,
         censor_value=DIST_RIGHT_CENSOR,
     )
-    ttc_rel_clean = _right_censor(
-        ttc_rel_raw,
-        ttc_rel_valid,
-        horizon=ttc_horizon,
-        censor_value=TTC_RIGHT_CENSOR,
-    )
 
-    ttc_proxy_risk = _exp_risk(ttc_proxy_clean, ttc_tau, smoothing_window)
-    dist_proxy_risk = _exp_risk(dist_proxy_clean, dist_tau, smoothing_window)
-    ttc_rel_risk = _exp_risk(ttc_rel_clean, ttc_tau, smoothing_window)
-
-    rss_proxy_raw = np.full(n, np.nan, dtype=np.float64)
-    rss_proxy_valid = ttc_proxy_valid & dist_proxy_valid
-    rss_proxy_raw[rss_proxy_valid] = (
-        (ttc_proxy_clean[rss_proxy_valid] < RSS_TTC_THRESH)
-        & (dist_proxy_clean[rss_proxy_valid] < RSS_DIST_THRESH)
-    ).astype(np.float64)
-    rss_proxy = _causal_smooth(rss_proxy_raw, smoothing_window)
+    ttc_risk = _exp_risk(ttc_clean, ttc_tau, smoothing_window)
+    dist_risk = _exp_risk(dist_clean, dist_tau, smoothing_window)
 
     return {
-        "ttc_proxy_raw": ttc_proxy_raw,
-        "ttc_rel_raw": ttc_rel_raw,
-        "ttc_proxy_risk": ttc_proxy_risk,
-        "dist_proxy_risk": dist_proxy_risk,
-        "ttc_rel_risk": ttc_rel_risk,
-        "rss_proxy": rss_proxy,
-        "gc_score": gc_score,
-        "gc_overlap_term": gc_overlap_term,
-        "gc_potential_term": gc_potential_term,
-        "gc_decel_term": gc_decel_term,
-        "gc_ttc_term": gc_ttc_term,
+        "ttc_raw": ttc_raw,
+        "ttc_risk": ttc_risk,
+        "dist_risk": dist_risk,
         "collision_cls": collision_cls,
         "point_collision_cls_mean": point_collision_cls_mean,
         "speed": speed,

@@ -1,0 +1,98 @@
+diff --git a/projects/mmdet3d_plugin/models/motion/decoder.py b/projects/mmdet3d_plugin/models/motion/decoder.py
+index a7b6e4a..60ea7a3 100644
+--- a/projects/mmdet3d_plugin/models/motion/decoder.py
++++ b/projects/mmdet3d_plugin/models/motion/decoder.py
+@@ -1322,16 +1322,27 @@ class V13LatLonTrajDecoder(object):
+         lat_reg = planning_results["lat_anchor_filter"]
+         lon_reg = planning_results["lon_anchor_filter"]
+ 
+-        traj_cls = planning_results["traj_cls"].sigmoid()
++        traj_logits_pre_rescore = planning_results["traj_cls"].clone()
++        traj_cls = traj_logits_pre_rescore.sigmoid()
+         traj_reg = planning_results["traj_reg"]
+         traj_mode_idx = traj_cls.argmax(dim=-1)
+         bs = traj_reg.shape[0]
+         num_lat_mode = lat_reg.shape[1]
+         num_lon_mode = lon_reg.shape[1]
++        collision_rescore_mask = torch.zeros_like(
++            traj_logits_pre_rescore,
++            dtype=torch.bool,
++        )
++        detection_rescore_mask = torch.zeros_like(
++            traj_logits_pre_rescore,
++            dtype=torch.bool,
++        )
+         if self.col_rescore:
+-            col_mask = planning_results["collision_cls"].sigmoid() > self.col_thresh
++            collision_rescore_mask = (
++                planning_results["collision_cls"].sigmoid() > self.col_thresh
++            )
+             traj_cls = torch.where(
+-                col_mask,
++                collision_rescore_mask,
+                 0,
+                 traj_cls,
+             )
+@@ -1343,6 +1354,7 @@ class V13LatLonTrajDecoder(object):
+             col_mask = get_col_mask(traj_anchor, traj_anchor_mask, det_output, motion_output, self.rescore_thresh)
+             for b in range(bs):
+                 mask = col_mask[b][..., :self.rescore_step].any(dim=-1).any(dim=-1).flatten()
++                detection_rescore_mask[b] = mask
+                 traj_cls[b] = torch.where(
+                     mask,
+                     0,
+@@ -1350,13 +1362,47 @@ class V13LatLonTrajDecoder(object):
+                 )
+             traj_mode_idx = traj_cls.argmax(dim=-1)
+ 
++        # Keep learned planner evidence separate from downstream collision
++        # rescoring. The distinction is required for interpreting weighted PCO.
++        combined_rescore_mask = collision_rescore_mask | detection_rescore_mask
++        traj_logits_post_rescore = torch.where(
++            combined_rescore_mask,
++            torch.full_like(traj_logits_pre_rescore, -1e9),
++            traj_logits_pre_rescore,
++        )
++
+         for b in range(bs):
+             row, col = divmod(traj_mode_idx[b].item(), num_lon_mode)
+             output[b]["lat_reg"] = lat_reg[b].cpu()
+             output[b]["lat_reg_final"] = lat_reg[b, row].cpu()
+             output[b]["lon_reg"] = lon_reg[b].cpu()
+             output[b]["lon_reg_final"] = lon_reg[b, col].cpu()
++
++            # Add more
++            output[b]["traj_reg"] = traj_reg[b].cpu()
++            output[b]["traj_cls"] = traj_cls[b].cpu()
++            # Explicit planner-score provenance. ``traj_cls_raw`` is retained
++            # as a compatibility alias and now means genuinely pre-rescore.
++            output[b]["traj_cls_raw"] = traj_logits_pre_rescore[b].cpu()
++            output[b]["traj_cls_logits_pre_rescore"] = (
++                traj_logits_pre_rescore[b].cpu()
++            )
++            output[b]["traj_cls_logits_post_rescore"] = (
++                traj_logits_post_rescore[b].cpu()
++            )
++            output[b]["traj_rescore_mask"] = combined_rescore_mask[b].cpu()
++            output[b]["traj_collision_rescore_mask"] = (
++                collision_rescore_mask[b].cpu()
++            )
++            output[b]["traj_detection_rescore_mask"] = (
++                detection_rescore_mask[b].cpu()
++            )
++            output[b]["traj_selected_mode_index"] = int(traj_mode_idx[b].item())
+             output[b]["traj_final"] = traj_reg[b, traj_mode_idx[b]].cpu()
++
++            # Pass through learned collision classifier (if trained)
++            if "collision_cls" in planning_results:
++                output[b]["collision_cls"] = planning_results["collision_cls"][b].cpu()
+         
+         return output
+ 
+@@ -1412,4 +1458,4 @@ class V13LatLonTrajDecoder(object):
+             output[b]["traj_reg"] = traj_reg[b].cpu()
+             output[b]["traj_reg_final"] = traj_reg[b, traj_mode_idx[b]].cpu()
+ 
+-        return output
+\ No newline at end of file
++        return output

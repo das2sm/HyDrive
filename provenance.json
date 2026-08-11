@@ -1,0 +1,46 @@
+{
+  "accounting": {
+    "accepted_jobs": 1665,
+    "complete_routes": 185,
+    "excluded_routes": [],
+    "mechanism_corrupt_jobs": [],
+    "mechanism_missing_jobs": [],
+    "missing_jobs": [],
+    "retry_summary": {
+      "accepted_attempts_by_arm": {
+        "baseline": 555,
+        "current_frame": 555,
+        "temporal": 555
+      },
+      "accepted_jobs_requiring_retry_by_arm": {},
+      "total_extra_attempts_for_accepted_jobs": 0
+    },
+    "scheduled_jobs": 1665
+  },
+  "campaign": {
+    "archive_sha256": "9fef67c4a0ddae629126bef32c8793d105f7c9092e6a7057ce7a4ade0c4a7c72",
+    "campaign_lock_content_sha256": "00db5fb4f32f2182163eabbce0ebc30fa03dde8e74141f3dbee3b0f2931bd7a1",
+    "campaign_lock_file_sha256": "51c1d4c4fdf378b5fa0ecd374beaf4af88e5a16303b1059eab67fbd4ec0c78e9",
+    "code_clean_at_freeze": true,
+    "data_lock_sha256": "6a0087fe3dc343c5502925b6f247760606c5b127b0a9c06af78021ef2690e488",
+    "fail2drive_clean_at_freeze": true,
+    "fail2drive_commit": "526b1dffb4b7544512d67cd2f3980f2d7051a05b",
+    "protocol_sha256": "8cecf0f44ea33f35a44066564bbe6ddc73aeff21cb4dc3931ce8a2f61ed9788a",
+    "public_id": "multiseed_v1",
+    "schedule_sha256": "61b8b8cf9f6aa9abd664382f2d2362e4143e319c89814b807b9c515bddb02c92"
+  },
+  "frozen_analysis_outputs": {
+    "contrast_table.csv": "fcb6295fd2b171212bcbdac3168486bf4a4fd713f658486df0233c938577fc96",
+    "job_outcomes.csv": "9b0fe758c73a36607568cb59cd83010f1d9cd98804fe59c70418bc48f1e4f3cd",
+    "results.json": "216012cb9d8031e420d742f6a5640bc111205ecb62b9eb674353cbbbc892f2ec",
+    "results_macros.tex": "8a0f0dacb31174e399cf6f9cebcd8312e006311eacf1f106660abddc4cd6da2d"
+  },
+  "frozen_inputs": {
+    "agent": "daff1a713da19dc32dfec330bfdf8e64cd146e4d1d221f8cd0dc559ec07ac8cb",
+    "carla_binary": "fdead75ee263802cc13ccff37c225be375472037e440c7460128fbd7ff2659b7",
+    "checkpoint": "f15c889b759734894e6ac906403df55a9973d7e60e3101da3ac71e9091f7b130",
+    "config": "c22709e7c064b5215227dde7ca13dc8a4b28ef943a818e5313146a7410b777c5",
+    "protocol": "8cecf0f44ea33f35a44066564bbe6ddc73aeff21cb4dc3931ce8a2f61ed9788a",
+    "route_manifest": "5e64b4c0c594196125a00bbaa995c599fe1ee3d5a07b62f956792b914b0ae98e"
+  }
+}

@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local runtime configuration
+.env
+configs/protocol.local.json
+
+# CARLA and campaign outputs
+CarlaUE4/
+f2d_carla/
+ckpt/
+campaign-output/
+jobs/
+attempts/
+*.pkl
+*.log
+
+# Generated figures
+figures/generated/*
+!figures/generated/.gitkeep
+docs/assets/*
+!docs/assets/fig01_method.png
+!docs/assets/fig02_scene_occupancy_case.png
+!docs/assets/fig04_route_level_outcomes.png
+
+# Build and packaging
+build/
+dist/
+*.egg-info/

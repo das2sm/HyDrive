@@ -1,0 +1,12 @@
+{
+  "carla": "0.9.15",
+  "cudnn": "8.7.0",
+  "cuda_runtime": "11.8",
+  "fixed_delta_seconds": 0.05,
+  "numpy": "1.24.4",
+  "operating_system": "Linux x86_64",
+  "python": "3.8.20",
+  "pytorch": "2.0.1+cu118",
+  "rendering": "offscreen Epic quality",
+  "traffic_manager_mode": "synchronous"
+}

@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software or artifact, please cite the technical report."
+title: "HyDrive: Privileged Occupancy Filtering for Fixed-Vocabulary End-to-End Driving"
+type: software
+authors:
+  - family-names: Das
+    given-names: Soham
+repository-code: "https://github.com/das2sm/HyDrive"
+url: "https://github.com/das2sm/HyDrive"
+version: 1.0.0
+license: MIT
+preferred-citation:
+  type: report
+  title: "Evaluating Privileged Occupancy Filtering for Fixed-Vocabulary End-to-End Driving"
+  authors:
+    - family-names: Das
+      given-names: Soham
+  year: 2026
+  url: "https://github.com/das2sm/HyDrive"

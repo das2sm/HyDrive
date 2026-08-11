@@ -1,0 +1,742 @@
+{
+  "arm_descriptives": {
+    "baseline": {
+      "binary_outcomes": {
+        "blocked": {
+          "denominator": 555,
+          "events": 28,
+          "rate": 0.05045045045045045
+        },
+        "collision": {
+          "denominator": 555,
+          "events": 241,
+          "rate": 0.43423423423423424
+        },
+        "collision_layout": {
+          "denominator": 555,
+          "events": 99,
+          "rate": 0.1783783783783784
+        },
+        "collision_pedestrian": {
+          "denominator": 555,
+          "events": 42,
+          "rate": 0.07567567567567568
+        },
+        "collision_vehicle": {
+          "denominator": 555,
+          "events": 111,
+          "rate": 0.2
+        },
+        "route_deviation": {
+          "denominator": 555,
+          "events": 2,
+          "rate": 0.0036036036036036037
+        },
+        "route_timeout": {
+          "denominator": 555,
+          "events": 36,
+          "rate": 0.06486486486486487
+        },
+        "scenario_timeout": {
+          "denominator": 555,
+          "events": 68,
+          "rate": 0.12252252252252252
+        },
+        "success": {
+          "denominator": 555,
+          "events": 306,
+          "rate": 0.5513513513513514
+        },
+        "timeout": {
+          "denominator": 555,
+          "events": 70,
+          "rate": 0.12612612612612611
+        }
+      },
+      "continuous_outcomes": {
+        "driving_score": {
+          "denominator": 555,
+          "mean": 49.83742240000003,
+          "unit": "points"
+        },
+        "route_completion": {
+          "denominator": 555,
+          "mean": 93.64282882882884,
+          "unit": "points"
+        }
+      },
+      "evaluation_seeds": [
+        1,
+        2,
+        3
+      ],
+      "jobs": 555,
+      "routes": 185
+    },
+    "current_frame": {
+      "binary_outcomes": {
+        "blocked": {
+          "denominator": 555,
+          "events": 37,
+          "rate": 0.06666666666666667
+        },
+        "collision": {
+          "denominator": 555,
+          "events": 239,
+          "rate": 0.4306306306306306
+        },
+        "collision_layout": {
+          "denominator": 555,
+          "events": 104,
+          "rate": 0.1873873873873874
+        },
+        "collision_pedestrian": {
+          "denominator": 555,
+          "events": 37,
+          "rate": 0.06666666666666667
+        },
+        "collision_vehicle": {
+          "denominator": 555,
+          "events": 118,
+          "rate": 0.2126126126126126
+        },
+        "route_deviation": {
+          "denominator": 555,
+          "events": 2,
+          "rate": 0.0036036036036036037
+        },
+        "route_timeout": {
+          "denominator": 555,
+          "events": 36,
+          "rate": 0.06486486486486487
+        },
+        "scenario_timeout": {
+          "denominator": 555,
+          "events": 64,
+          "rate": 0.11531531531531532
+        },
+        "success": {
+          "denominator": 555,
+          "events": 310,
+          "rate": 0.5585585585585585
+        },
+        "timeout": {
+          "denominator": 555,
+          "events": 68,
+          "rate": 0.12252252252252252
+        }
+      },
+      "continuous_outcomes": {
+        "driving_score": {
+          "denominator": 555,
+          "mean": 49.388796263063064,
+          "unit": "points"
+        },
+        "route_completion": {
+          "denominator": 555,
+          "mean": 92.40845045045049,
+          "unit": "points"
+        }
+      },
+      "evaluation_seeds": [
+        1,
+        2,
+        3
+      ],
+      "jobs": 555,
+      "mechanism": {
+        "all_unsafe_rate": 0.3495787914157858,
+        "clear_alternative_given_flagged_rate": 0.22394198965312526,
+        "flagged_without_clear_alternative_rate": 0.42342572344239787,
+        "jobs": 555,
+        "logged_frames": 1253417,
+        "original_flagged_rate": 0.5456109179945701,
+        "switch_rate": 0.12218519455217218
+      },
+      "routes": 185
+    },
+    "temporal": {
+      "binary_outcomes": {
+        "blocked": {
+          "denominator": 555,
+          "events": 28,
+          "rate": 0.05045045045045045
+        },
+        "collision": {
+          "denominator": 555,
+          "events": 219,
+          "rate": 0.3945945945945946
+        },
+        "collision_layout": {
+          "denominator": 555,
+          "events": 97,
+          "rate": 0.17477477477477477
+        },
+        "collision_pedestrian": {
+          "denominator": 555,
+          "events": 37,
+          "rate": 0.06666666666666667
+        },
+        "collision_vehicle": {
+          "denominator": 555,
+          "events": 102,
+          "rate": 0.1837837837837838
+        },
+        "route_deviation": {
+          "denominator": 555,
+          "events": 2,
+          "rate": 0.0036036036036036037
+        },
+        "route_timeout": {
+          "denominator": 555,
+          "events": 28,
+          "rate": 0.05045045045045045
+        },
+        "scenario_timeout": {
+          "denominator": 555,
+          "events": 53,
+          "rate": 0.09549549549549549
+        },
+        "success": {
+          "denominator": 555,
+          "events": 329,
+          "rate": 0.5927927927927928
+        },
+        "timeout": {
+          "denominator": 555,
+          "events": 55,
+          "rate": 0.0990990990990991
+        }
+      },
+      "continuous_outcomes": {
+        "driving_score": {
+          "denominator": 555,
+          "mean": 51.90863087387382,
+          "unit": "points"
+        },
+        "route_completion": {
+          "denominator": 555,
+          "mean": 94.20482882882881,
+          "unit": "points"
+        }
+      },
+      "evaluation_seeds": [
+        1,
+        2,
+        3
+      ],
+      "jobs": 555,
+      "mechanism": {
+        "all_unsafe_rate": 0.3060929158484572,
+        "clear_alternative_given_flagged_rate": 0.21135570244801877,
+        "flagged_without_clear_alternative_rate": 0.37962783493671687,
+        "jobs": 555,
+        "logged_frames": 1140193,
+        "original_flagged_rate": 0.4813676281120828,
+        "switch_rate": 0.10173979317536593
+      },
+      "routes": 185
+    }
+  },
+  "campaign_id": "multiseed_v1",
+  "completion_guardrail": {
+    "margin_points": -5.0,
+    "passed": true,
+    "temporal_vs_baseline": {
+      "ci95_lower": -0.9222159872579759,
+      "ci95_upper": 2.306728444310275,
+      "estimate": 0.5620000000000003
+    }
+  },
+  "contrasts": {
+    "current_frame_vs_baseline": {
+      "blocked": {
+        "ci95_lower": 0.0035273368606701934,
+        "ci95_upper": 0.03260869565217391,
+        "estimate": 0.016216216216216217
+      },
+      "collision": {
+        "ci95_lower": -0.04561837285521497,
+        "ci95_upper": 0.03846153846153845,
+        "estimate": -0.0036036036036036054
+      },
+      "collision_layout": {
+        "ci95_lower": -0.01058201058201058,
+        "ci95_upper": 0.0285204991087344,
+        "estimate": 0.009009009009009009
+      },
+      "collision_pedestrian": {
+        "ci95_lower": -0.02280701754385965,
+        "ci95_upper": 0.0018726591760299621,
+        "estimate": -0.009009009009009009
+      },
+      "collision_vehicle": {
+        "ci95_lower": -0.028828828828828833,
+        "ci95_upper": 0.0552584670231729,
+        "estimate": 0.01261261261261261
+      },
+      "driving_score": {
+        "ci95_lower": -2.5056974931737583,
+        "ci95_upper": 1.408303768211526,
+        "estimate": -0.44862613693693676
+      },
+      "route_completion": {
+        "ci95_lower": -3.04602772057772,
+        "ci95_upper": 0.702759803921568,
+        "estimate": -1.2343783783783784
+      },
+      "route_deviation": {
+        "ci95_lower": -0.0072072072072072065,
+        "ci95_upper": 0.0072072072072072065,
+        "estimate": 0.0
+      },
+      "route_timeout": {
+        "ci95_lower": -0.027326157449108275,
+        "ci95_upper": 0.025641025641025637,
+        "estimate": -2.400482215405744e-18
+      },
+      "scenario_timeout": {
+        "ci95_lower": -0.028673835125448032,
+        "ci95_upper": 0.012546498111014095,
+        "estimate": -0.007207207207207208
+      },
+      "success": {
+        "ci95_lower": -0.03423423423423424,
+        "ci95_upper": 0.0481283422459893,
+        "estimate": 0.007207207207207211
+      },
+      "timeout": {
+        "ci95_lower": -0.025641025641025644,
+        "ci95_upper": 0.017730496453900707,
+        "estimate": -0.0036036036036036054
+      }
+    },
+    "temporal_vs_baseline": {
+      "blocked": {
+        "ci95_lower": -0.018214936247723135,
+        "ci95_upper": 0.014492753623188408,
+        "estimate": 0.0
+      },
+      "collision": {
+        "ci95_lower": -0.07734806629834254,
+        "ci95_upper": -0.0035273368606701977,
+        "estimate": -0.039639639639639644
+      },
+      "collision_layout": {
+        "ci95_lower": -0.026595744680851064,
+        "ci95_upper": 0.01929824561403509,
+        "estimate": -0.003603603603603604
+      },
+      "collision_pedestrian": {
+        "ci95_lower": -0.030965391621129327,
+        "ci95_upper": 0.016216216216216217,
+        "estimate": -0.00900900900900901
+      },
+      "collision_vehicle": {
+        "ci95_lower": -0.053475935828877004,
+        "ci95_upper": 0.020373215394164864,
+        "estimate": -0.016216216216216214
+      },
+      "driving_score": {
+        "ci95_lower": 0.2634898386860217,
+        "ci95_upper": 3.982014406060606,
+        "estimate": 2.0712084738738743
+      },
+      "route_completion": {
+        "ci95_lower": -0.9222159872579759,
+        "ci95_upper": 2.306728444310275,
+        "estimate": 0.5620000000000003
+      },
+      "route_deviation": {
+        "ci95_lower": -0.005376344086021506,
+        "ci95_upper": 0.005376344086021506,
+        "estimate": 0.0
+      },
+      "route_timeout": {
+        "ci95_lower": -0.039639639639639644,
+        "ci95_upper": 0.008912655971479501,
+        "estimate": -0.014414414414414416
+      },
+      "scenario_timeout": {
+        "ci95_lower": -0.0564373897707231,
+        "ci95_upper": -0.0017921146953405027,
+        "estimate": -0.02702702702702703
+      },
+      "success": {
+        "ci95_lower": 0.005347593582887699,
+        "ci95_upper": 0.07885304659498207,
+        "estimate": 0.04144144144144144
+      },
+      "timeout": {
+        "ci95_lower": -0.05615942028985508,
+        "ci95_upper": -0.0017921146953405027,
+        "estimate": -0.02702702702702703
+      }
+    },
+    "temporal_vs_current_frame": {
+      "blocked": {
+        "ci95_lower": -0.031135531135531132,
+        "ci95_upper": -0.0053475935828877,
+        "estimate": -0.016216216216216214
+      },
+      "collision": {
+        "ci95_lower": -0.07446858037164708,
+        "ci95_upper": 6.002020919701587e-19,
+        "estimate": -0.03603603603603604
+      },
+      "collision_layout": {
+        "ci95_lower": -0.03208556149732621,
+        "ci95_upper": 0.005494505494505496,
+        "estimate": -0.012612612612612614
+      },
+      "collision_pedestrian": {
+        "ci95_lower": -0.02197802197802198,
+        "ci95_upper": 0.02536231884057971,
+        "estimate": -6.00120553851436e-19
+      },
+      "collision_vehicle": {
+        "ci95_lower": -0.06227106227106227,
+        "ci95_upper": 0.001782531194295901,
+        "estimate": -0.028828828828828822
+      },
+      "driving_score": {
+        "ci95_lower": 0.6763437394038869,
+        "ci95_upper": 4.650467549144336,
+        "estimate": 2.5198346108108107
+      },
+      "route_completion": {
+        "ci95_lower": 0.5190478142076503,
+        "ci95_upper": 3.216020372340424,
+        "estimate": 1.7963783783783787
+      },
+      "route_deviation": {
+        "ci95_lower": -0.0072072072072072065,
+        "ci95_upper": 0.0072072072072072065,
+        "estimate": 0.0
+      },
+      "route_timeout": {
+        "ci95_lower": -0.03763440860215054,
+        "ci95_upper": 0.0072072072072072065,
+        "estimate": -0.014414414414414413
+      },
+      "scenario_timeout": {
+        "ci95_lower": -0.0499108734402852,
+        "ci95_upper": 0.007168458781362007,
+        "estimate": -0.01981981981981982
+      },
+      "success": {
+        "ci95_lower": -2.3754504489884106e-18,
+        "ci95_upper": 0.07182586992342713,
+        "estimate": 0.03423423423423423
+      },
+      "timeout": {
+        "ci95_lower": -0.05405405405405406,
+        "ci95_upper": 0.003642987249544627,
+        "estimate": -0.023423423423423427
+      }
+    }
+  },
+  "design": {
+    "arm_position_counts": {
+      "baseline:position_1": 185,
+      "baseline:position_2": 185,
+      "baseline:position_3": 185,
+      "current_frame:position_1": 185,
+      "current_frame:position_2": 185,
+      "current_frame:position_3": 185,
+      "temporal:position_1": 185,
+      "temporal:position_2": 185,
+      "temporal:position_3": 185
+    },
+    "bootstrap_replicates": 20000,
+    "bootstrap_seed": 20260711,
+    "evaluation_seeds": [
+      1,
+      2,
+      3
+    ],
+    "fixed_delta_seconds": 0.05,
+    "jobs": 1665,
+    "jobs_by_arm": {
+      "baseline": 555,
+      "current_frame": 555,
+      "temporal": 555
+    },
+    "permutation_counts": {
+      "baseline-current_frame-temporal": 93,
+      "baseline-temporal-current_frame": 92,
+      "current_frame-baseline-temporal": 92,
+      "current_frame-temporal-baseline": 93,
+      "temporal-baseline-current_frame": 93,
+      "temporal-current_frame-baseline": 92
+    },
+    "route_families": 97,
+    "routes": 185,
+    "scheduler_seed": 20260711
+  },
+  "generated_at": "2026-07-24T09:50:34.692683+00:00",
+  "integrity": {
+    "accepted_jobs": 1665,
+    "complete_three_arm_routes": 185,
+    "contrast_route_counts": {
+      "current_frame_vs_baseline": 185,
+      "temporal_vs_baseline": 185,
+      "temporal_vs_current_frame": 185
+    },
+    "excluded_routes": [],
+    "locked_files": 11655,
+    "mechanism_corrupt_jobs": [],
+    "mechanism_missing_jobs": [],
+    "missing_jobs": [],
+    "primary_complete_routes": 185,
+    "retry_summary": {
+      "accepted_attempts_by_arm": {
+        "baseline": 555,
+        "current_frame": 555,
+        "temporal": 555
+      },
+      "accepted_jobs_requiring_retry_by_arm": {},
+      "total_extra_attempts_for_accepted_jobs": 0
+    },
+    "scheduled_jobs": 1665
+  },
+  "interpretation": {
+    "branch": "positive",
+    "headline_claim": "Under the evaluated multi-seed Fail2Drive protocol, privileged temporal occupancy filtering reduced official collision-route incidence relative to unmodified SparseDriveV2 while satisfying the pre-specified route-completion guardrail.",
+    "secondary_temporal_vs_current_frame_resolved": false
+  },
+  "primary_missing_outcome_bounds": {
+    "lower": -0.03963963963963963,
+    "upper": -0.03963963963963963
+  },
+  "provenance": {
+    "analysis_sha256": {
+      "contrast_table.csv": "fcb6295fd2b171212bcbdac3168486bf4a4fd713f658486df0233c938577fc96",
+      "job_outcomes.csv": "9b0fe758c73a36607568cb59cd83010f1d9cd98804fe59c70418bc48f1e4f3cd",
+      "results.json": "216012cb9d8031e420d742f6a5640bc111205ecb62b9eb674353cbbbc892f2ec",
+      "results_macros.tex": "8a0f0dacb31174e399cf6f9cebcd8312e006311eacf1f106660abddc4cd6da2d"
+    },
+    "archive": {
+      "filename": "campaign_archive.tar.zst",
+      "sha256": "9fef67c4a0ddae629126bef32c8793d105f7c9092e6a7057ce7a4ade0c4a7c72"
+    },
+    "campaign_code_clean_at_freeze": true,
+    "campaign_lock_content_sha256": "00db5fb4f32f2182163eabbce0ebc30fa03dde8e74141f3dbee3b0f2931bd7a1",
+    "campaign_lock_file_sha256": "51c1d4c4fdf378b5fa0ecd374beaf4af88e5a16303b1059eab67fbd4ec0c78e9",
+    "data_lock_sha256": "6a0087fe3dc343c5502925b6f247760606c5b127b0a9c06af78021ef2690e488",
+    "fail2drive_clean_at_freeze": true,
+    "fail2drive_commit": "526b1dffb4b7544512d67cd2f3980f2d7051a05b",
+    "protocol_sha256": "8cecf0f44ea33f35a44066564bbe6ddc73aeff21cb4dc3931ce8a2f61ed9788a",
+    "schedule_sha256": "61b8b8cf9f6aa9abd664382f2d2362e4143e319c89814b807b9c515bddb02c92"
+  },
+  "schema_version": 2,
+  "seed_arm_descriptives": {
+    "1": {
+      "baseline": {
+        "collision_jobs": 83,
+        "collision_rate": 0.4486486486486487,
+        "jobs": 185,
+        "mean_route_completion": 93.66681081081082
+      },
+      "current_frame": {
+        "collision_jobs": 79,
+        "collision_rate": 0.42702702702702705,
+        "jobs": 185,
+        "mean_route_completion": 92.50583783783784
+      },
+      "temporal": {
+        "collision_jobs": 72,
+        "collision_rate": 0.3891891891891892,
+        "jobs": 185,
+        "mean_route_completion": 94.96621621621621
+      }
+    },
+    "2": {
+      "baseline": {
+        "collision_jobs": 79,
+        "collision_rate": 0.42702702702702705,
+        "jobs": 185,
+        "mean_route_completion": 93.47394594594593
+      },
+      "current_frame": {
+        "collision_jobs": 86,
+        "collision_rate": 0.4648648648648649,
+        "jobs": 185,
+        "mean_route_completion": 90.93367567567572
+      },
+      "temporal": {
+        "collision_jobs": 76,
+        "collision_rate": 0.41081081081081083,
+        "jobs": 185,
+        "mean_route_completion": 93.72216216216214
+      }
+    },
+    "3": {
+      "baseline": {
+        "collision_jobs": 79,
+        "collision_rate": 0.42702702702702705,
+        "jobs": 185,
+        "mean_route_completion": 93.78772972972975
+      },
+      "current_frame": {
+        "collision_jobs": 74,
+        "collision_rate": 0.4,
+        "jobs": 185,
+        "mean_route_completion": 93.78583783783782
+      },
+      "temporal": {
+        "collision_jobs": 71,
+        "collision_rate": 0.3837837837837838,
+        "jobs": 185,
+        "mean_route_completion": 93.92610810810812
+      }
+    }
+  },
+  "seed_estimates": {
+    "1": {
+      "temporal_vs_baseline": {
+        "collision": {
+          "ci95_lower": -0.11827956989247312,
+          "ci95_upper": 0.0,
+          "estimate": -0.05945945945945946
+        },
+        "route_completion": {
+          "ci95_lower": -0.9812085416182282,
+          "ci95_upper": 4.07436298901853,
+          "estimate": 1.2994054054054054
+        }
+      },
+      "temporal_vs_current_frame": {
+        "collision": {
+          "ci95_lower": -0.1005586592178771,
+          "ci95_upper": 0.021739130434782608,
+          "estimate": -0.03783783783783784
+        },
+        "route_completion": {
+          "ci95_lower": 0.13258407755581691,
+          "ci95_upper": 5.0380833310125865,
+          "estimate": 2.460378378378379
+        }
+      }
+    },
+    "2": {
+      "temporal_vs_baseline": {
+        "collision": {
+          "ci95_lower": -0.06315789473684211,
+          "ci95_upper": 0.031746031746031744,
+          "estimate": -0.016216216216216217
+        },
+        "route_completion": {
+          "ci95_lower": -1.1723747628083492,
+          "ci95_upper": 1.7422912234042551,
+          "estimate": 0.24821621621621617
+        }
+      },
+      "temporal_vs_current_frame": {
+        "collision": {
+          "ci95_lower": -0.11413043478260869,
+          "ci95_upper": 0.0053475935828877,
+          "estimate": -0.05405405405405406
+        },
+        "route_completion": {
+          "ci95_lower": 0.39238516548463315,
+          "ci95_upper": 5.379350458365163,
+          "estimate": 2.7884864864864864
+        }
+      }
+    },
+    "3": {
+      "temporal_vs_baseline": {
+        "collision": {
+          "ci95_lower": -0.09340659340659341,
+          "ci95_upper": 0.005405405405405406,
+          "estimate": -0.043243243243243246
+        },
+        "route_completion": {
+          "ci95_lower": -1.900379788484136,
+          "ci95_upper": 2.1603275401069464,
+          "estimate": 0.1383783783783785
+        }
+      },
+      "temporal_vs_current_frame": {
+        "collision": {
+          "ci95_lower": -0.06417112299465241,
+          "ci95_upper": 0.03260869565217391,
+          "estimate": -0.016216216216216217
+        },
+        "route_completion": {
+          "ci95_lower": -1.79848404628331,
+          "ci95_upper": 2.1803552544565767,
+          "estimate": 0.1402702702702702
+        }
+      }
+    }
+  },
+  "split_analysis": {
+    "generalization_minus_base_interaction": {
+      "ci95_lower": -0.07160530487906103,
+      "ci95_upper": 0.04930726309194105,
+      "estimate": -0.010582630427991256
+    },
+    "metric": "collision",
+    "splits": {
+      "Base": {
+        "arms": {
+          "baseline": {
+            "collision_jobs": 88,
+            "collision_rate": 0.3333333333333333,
+            "jobs": 264
+          },
+          "temporal": {
+            "collision_jobs": 79,
+            "collision_rate": 0.29924242424242425,
+            "jobs": 264
+          }
+        },
+        "routes": 88,
+        "temporal_vs_baseline": {
+          "ci95_lower": -0.08333333333333334,
+          "ci95_upper": 0.011363636363636366,
+          "estimate": -0.034090909090909095
+        }
+      },
+      "Generalization": {
+        "arms": {
+          "baseline": {
+            "collision_jobs": 153,
+            "collision_rate": 0.5257731958762887,
+            "jobs": 291
+          },
+          "temporal": {
+            "collision_jobs": 140,
+            "collision_rate": 0.48109965635738833,
+            "jobs": 291
+          }
+        },
+        "routes": 97,
+        "temporal_vs_baseline": {
+          "ci95_lower": -0.09278350515463919,
+          "ci95_upper": 0.003436426116838486,
+          "estimate": -0.04467353951890035
+        }
+      }
+    },
+    "status": "supporting_post_campaign"
+  },
+  "status": "locked_analysis_complete",
+  "units": {
+    "blocked": "proportion",
+    "collision": "proportion",
+    "collision_layout": "proportion",
+    "collision_pedestrian": "proportion",
+    "collision_vehicle": "proportion",
+    "driving_score": "points",
+    "mechanism_rates": "frame-weighted proportion",
+    "route_completion": "points",
+    "route_deviation": "proportion",
+    "route_timeout": "proportion",
+    "scenario_timeout": "proportion",
+    "success": "proportion",
+    "timeout": "proportion"
+  }
+}

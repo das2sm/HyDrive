@@ -1,0 +1,27 @@
+{
+  "clear_mask_disagreement_count": 395,
+  "current_actor_counts": {
+    "dynamic_actor_count": 12,
+    "skipped_actor_count": 0,
+    "source": "temporal_cv",
+    "static_actor_count": 0
+  },
+  "current_original_clear": false,
+  "development_only": true,
+  "fixed_delta_seconds": 0.05,
+  "front_camera_sequence_complete": true,
+  "original_mode": 2,
+  "outcome_eligible": false,
+  "route": "Base_HardBrake_0035",
+  "schema_version": 3,
+  "selection_criterion": "earliest_original_classification_disagreement",
+  "simulator_frame": 18475,
+  "temporal_actor_counts": {
+    "dynamic_actor_count": 12,
+    "skipped_actor_count": 0,
+    "source": "temporal_cv",
+    "static_actor_count": 0
+  },
+  "temporal_original_clear": true,
+  "traffic_seed": 10035
+}

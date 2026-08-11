@@ -1,0 +1,227 @@
+diff --git a/fail2drive_leaderboard/leaderboard/leaderboard_evaluator.py b/fail2drive_leaderboard/leaderboard/leaderboard_evaluator.py
+index f52b0a7..09af8b7 100644
+--- a/fail2drive_leaderboard/leaderboard/leaderboard_evaluator.py
++++ b/fail2drive_leaderboard/leaderboard/leaderboard_evaluator.py
+@@ -464,8 +464,20 @@ def main():
+ 
+     parser.add_argument("--track", type=str, default='SENSORS',
+                         help="Participation track: SENSORS, MAP")
+-    parser.add_argument('--resume', type=bool, default=False,
+-                        help='Resume execution from last checkpoint?')
++    resume_group = parser.add_mutually_exclusive_group()
++    resume_group.add_argument(
++        '--resume',
++        dest='resume',
++        action='store_true',
++        help='Resume execution from last checkpoint.',
++    )
++    resume_group.add_argument(
++        '--no-resume',
++        dest='resume',
++        action='store_false',
++        help='Start from a fresh checkpoint (default).',
++    )
++    parser.set_defaults(resume=False)
+     parser.add_argument("--checkpoint", type=str, default='./simulation_results.json',
+                         help="Path to checkpoint used for saving statistics and resuming")
+     parser.add_argument("--debug-checkpoint", type=str, default='./live_results.txt',
+diff --git a/fail2drive_leaderboard/leaderboard/leaderboard_evaluator_local.py b/fail2drive_leaderboard/leaderboard/leaderboard_evaluator_local.py
+index fbb8b61..55f3706 100644
+--- a/fail2drive_leaderboard/leaderboard/leaderboard_evaluator_local.py
++++ b/fail2drive_leaderboard/leaderboard/leaderboard_evaluator_local.py
+@@ -494,8 +494,20 @@ def main():
+ 
+     parser.add_argument("--track", type=str, default='SENSORS',
+                         help="Participation track: SENSORS, MAP")
+-    parser.add_argument('--resume', type=int, default=False,
+-                        help='Resume execution from last checkpoint?')
++    resume_group = parser.add_mutually_exclusive_group()
++    resume_group.add_argument(
++        '--resume',
++        dest='resume',
++        action='store_true',
++        help='Resume execution from last checkpoint.',
++    )
++    resume_group.add_argument(
++        '--no-resume',
++        dest='resume',
++        action='store_false',
++        help='Start from a fresh checkpoint (default).',
++    )
++    parser.set_defaults(resume=False)
+     parser.add_argument("--checkpoint", type=str, default='./simulation_results.json',
+                         help="Path to checkpoint used for saving statistics and resuming")
+     parser.add_argument("--debug-checkpoint", type=str, default='./live_results.txt',
+diff --git a/fail2drive_leaderboard/leaderboard/scenarios/route_scenario.py b/fail2drive_leaderboard/leaderboard/scenarios/route_scenario.py
+index c5e7517..5683144 100644
+--- a/fail2drive_leaderboard/leaderboard/scenarios/route_scenario.py
++++ b/fail2drive_leaderboard/leaderboard/scenarios/route_scenario.py
+@@ -102,6 +102,9 @@ class RouteScenario(BasicScenario):
+ 
+         # Do it after the 'super', as we need the behavior and criteria tree to be initialized
+         self.build_scenarios(ego_vehicle, debug=debug_mode > 0)
++        if os.getenv("HYDRIVE_STRICT_CAMPAIGN", "0") == "1" and self.missing_scenario_configurations:
++            pending = [config.type for config in self.missing_scenario_configurations]
++            raise RuntimeError(f"Strict campaign left scenarios uninitialized: {pending}")
+ 
+         # Set runtime init mode. Do this after the first set of scenarios has been initialized!
+         CarlaDataProvider.set_runtime_init_mode(True)
+@@ -183,11 +186,11 @@ class RouteScenario(BasicScenario):
+         for scenario in self.list_scenarios:
+             occupied_parking_locations.extend(scenario.get_parking_slots())
+ 
+-        available_parking_locations = []
+         map_name = self.map.name.split('/')[-1]
+-        available_parking_locations = getattr(parked_vehicles, map_name, [])
++        available_parking_locations = list(getattr(parked_vehicles, map_name, []))
+ 
+         # Exclude parking slots that are too far from the route
++        filtered_parking_locations = []
+         for slot in available_parking_locations:
+             slot_transform = carla.Transform(
+                 location=carla.Location(slot["location"][0], slot["location"][1], slot["location"][2]),
+@@ -196,11 +199,10 @@ class RouteScenario(BasicScenario):
+ 
+             in_area = (min_x < slot_transform.location.x < max_x) and (min_y < slot_transform.location.y < max_y)
+             close_to_route = is_close(slot_transform.location)
+-            if not in_area or not close_to_route:
+-                available_parking_locations.remove(slot)
+-                continue
++            if in_area and close_to_route:
++                filtered_parking_locations.append(slot)
+ 
+-        self.available_parking_locations = available_parking_locations
++        self.available_parking_locations = filtered_parking_locations
+ 
+     def spawn_parked_vehicles(self, ego_vehicle, max_scenario_distance=10):
+         """Spawn parked vehicles."""
+@@ -218,6 +220,7 @@ class RouteScenario(BasicScenario):
+         if ego_location is None:
+             return
+ 
++        remaining_parking_locations = []
+         for slot in self.available_parking_locations:
+             slot_transform = carla.Transform(
+                 location=carla.Location(slot["location"][0], slot["location"][1], slot["location"][2]),
+@@ -230,7 +233,10 @@ class RouteScenario(BasicScenario):
+                 mesh_bp.set_attribute("mesh_path", slot["mesh"])
+                 mesh_bp.set_attribute("scale", "0.9")
+                 new_parked_vehicles.append(carla.command.SpawnActor(mesh_bp, slot_transform))
+-                self.available_parking_locations.remove(slot)
++            else:
++                remaining_parking_locations.append(slot)
++
++        self.available_parking_locations = remaining_parking_locations
+ 
+         # Add the actors to _parked_ids
+         for response in CarlaDataProvider.get_client().apply_batch_sync(new_parked_vehicles):
+@@ -304,7 +310,7 @@ class RouteScenario(BasicScenario):
+             self.ego_data = ActorConfigurationData(ego_vehicle.type_id, ego_vehicle.get_transform(), 'hero')
+ 
+         # Part 1. Check all scenarios that haven't been initialized, starting them if close enough to the ego vehicle
+-        for scenario_config in self.missing_scenario_configurations:
++        for scenario_config in list(self.missing_scenario_configurations):
+             scenario_config.ego_vehicles = [self.ego_data]
+             scenario_config.route = self.route
+ 
+@@ -339,6 +345,11 @@ class RouteScenario(BasicScenario):
+                         )
+ 
+             except Exception as e:
++                if os.getenv("HYDRIVE_STRICT_CAMPAIGN", "0") == "1":
++                    raise RuntimeError(
++                        f"Strict campaign could not initialize scenario "
++                        f"{scenario_config.name!r} ({scenario_config.type!r})"
++                    ) from e
+                 print(f"\033[93mSkipping scenario '{scenario_config.name}' due to setup error: {e}")
+                 if debug:
+                     print(f"\n{traceback.format_exc()}")
+diff --git a/fail2drive_leaderboard/leaderboard/scenarios/scenario_manager.py b/fail2drive_leaderboard/leaderboard/scenarios/scenario_manager.py
+index 934dfb7..c3fbc64 100644
+--- a/fail2drive_leaderboard/leaderboard/scenarios/scenario_manager.py
++++ b/fail2drive_leaderboard/leaderboard/scenarios/scenario_manager.py
+@@ -14,6 +14,7 @@ from __future__ import print_function
+ import signal
+ import sys
+ import time
++import os
+ 
+ import py_trees
+ import carla
+@@ -71,6 +72,8 @@ class ScenarioManager(object):
+         self._watchdog = None
+         self._agent_watchdog = None
+         self._scenario_thread = None
++        self._strict_campaign = os.getenv("HYDRIVE_STRICT_CAMPAIGN", "0") == "1"
++        self._last_runtime_init_game_time = None
+ 
+         self._statistics_manager = statistics_manager
+ 
+@@ -134,6 +137,13 @@ class ScenarioManager(object):
+             self.scenario.spawn_parked_vehicles(self.ego_vehicles[0])
+             time.sleep(1)
+ 
++    def _run_runtime_initialization(self):
++        """Initialize route content on simulation time in strict campaigns."""
++        self.scenario.build_scenarios(
++            self.ego_vehicles[0], debug=self._debug_mode > 0
++        )
++        self.scenario.spawn_parked_vehicles(self.ego_vehicles[0])
++
+     def run_scenario(self):
+         """
+         Trigger the start of the scenario and wait for it to finish/fail
+@@ -151,9 +161,23 @@ class ScenarioManager(object):
+ 
+         self._running = True
+ 
+-        # Thread for build_scenarios
+-        self._scenario_thread = threading.Thread(target=self.build_scenarios_loop, args=(self._debug_mode > 0, ))
+-        self._scenario_thread.start()
++        if self._strict_campaign:
++            self._run_runtime_initialization()
++            self._last_runtime_init_game_time = GameTime.get_time()
++            print(
++                "HYDRIVE_SCENARIO_INIT_OK "
++                f"initialized={len(self.scenario.list_scenarios)} "
++                f"pending={len(self.scenario.missing_scenario_configurations)} "
++                f"parked={len(self.scenario._parked_ids)}"
++            )
++        else:
++            # The upstream evaluator uses a wall-clock thread. Strict campaigns
++            # instead schedule initialization from simulation time below.
++            self._scenario_thread = threading.Thread(
++                target=self.build_scenarios_loop,
++                args=(self._debug_mode > 0, ),
++            )
++            self._scenario_thread.start()
+ 
+         while self._running:
+             self._tick_scenario()
+@@ -174,6 +198,14 @@ class ScenarioManager(object):
+             # Update game time and actor information
+             GameTime.on_carla_tick(timestamp)
+             CarlaDataProvider.on_carla_tick()
++            if self._strict_campaign:
++                game_time = GameTime.get_time()
++                if (
++                    self._last_runtime_init_game_time is None
++                    or game_time - self._last_runtime_init_game_time >= 1.0
++                ):
++                    self._run_runtime_initialization()
++                    self._last_runtime_init_game_time = game_time
+             self._watchdog.pause()
+ 
+             try:
+@@ -258,8 +290,9 @@ class ScenarioManager(object):
+ 
+         # Make sure the scenario thread finishes to avoid blocks
+         self._running = False
+-        self._scenario_thread.join()
+-        self._scenario_thread = None
++        if self._scenario_thread is not None:
++            self._scenario_thread.join()
++            self._scenario_thread = None
+ 
+     def compute_duration_time(self):
+         """
